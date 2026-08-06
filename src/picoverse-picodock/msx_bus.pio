@@ -1,0 +1,142 @@
+; MSX PICOVERSE PROJECT
+; (c) 2026 Cristiano Goncalves
+; The Retro Hacker
+;
+; msx_bus.pio - PIO programs for MSX bus interface
+;
+; This work is licensed under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+; License". https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+.program msx_read_responder
+
+.wrap_target
+wait_sltsl:
+    wait 0 gpio 27
+    jmp pin wait_sltsl
+    set pindirs, 1
+    in pins, 16
+    push block
+    pull block
+    out pins, 8
+    out pindirs, 8
+    set pindirs, 0 [1]
+    wait 1 gpio 24
+    set x, 0
+    mov osr, x
+    out pindirs, 8
+.wrap
+
+.program msx_write_captor
+
+.wrap_target
+wait_sltsl:
+    wait 0 gpio 27
+    jmp pin wait_sltsl
+    nop              [2]
+    mov isr, pins
+    push block
+    wait 1 gpio 25
+.wrap
+
+; ===================================================================
+; msx_io_write_captor
+; ===================================================================
+; Captures address + data during MSX I/O write cycles (/IORQ + /WR).
+; Used for intercepting writes to mapper ports (FC-FF).
+;
+; RX FIFO word format:
+;   bits[15:0]  = A0..A15
+;   bits[23:16] = D0..D7
+;
+; No side-set, no out pins needed.
+; FIFO join RX for deep buffering (8 entries).
+
+.program msx_io_write_captor
+
+; jmp_pin must be configured to /WR (GPIO 25) from C code.
+;   /WR=1 (inactive) → jump taken  → re-check /IORQ
+;   /WR=0 (active)   → fall through → capture the write
+
+.wrap_target
+wait_iorq:
+    wait 0 gpio 26           ; Wait for /IORQ=0 (I/O request)
+    jmp pin wait_iorq         ; If /WR=1 (no write), re-check /IORQ
+    nop              [2]     ; Let address + data settle (3 cycles)
+    mov isr, pins            ; Snapshot all GPIOs into ISR
+    push block               ; Send (addr+data) to CPU via RX FIFO
+    wait 1 gpio 25           ; Wait for /WR=1 (write cycle ends)
+.wrap
+
+; ===================================================================
+; msx_io_read_responder
+; ===================================================================
+; Responds to MSX I/O read cycles (/IORQ + /RD).
+; Used for reading mapper port registers (FC-FF).
+;
+; in_base     = GPIO 0  (A0), 16 pins
+; out_base    = GPIO 16 (D0), 8 pins
+
+.program msx_io_read_responder
+
+; jmp_pin must be configured to /RD (GPIO 24) from C code.
+;   /RD=1 (inactive) → jump taken  → re-check /IORQ
+;   /RD=0 (active)   → fall through → handle the read
+
+.wrap_target
+wait_iorq:
+    wait 0 gpio 26                ; Wait for /IORQ=0 (I/O request)
+    jmp pin wait_iorq             ; If /RD=1 (no read), re-check /IORQ
+    nop                           ; timing spacer
+    in pins, 16                   ; Capture A0..A15 into ISR
+    push block                    ; Send address to CPU via RX FIFO
+    pull block                    ; Wait for CPU response in TX FIFO (data token)
+    out pins, 8                   ; Drive D0..D7 with data byte
+    out pindirs, 8                ; Set pindirs (0xFF=output, 0x00=tristate)
+    nop                    [1]    ; Data hold before /RD rises
+    wait 1 gpio 24                ; Wait for /RD=1 (bus cycle ends)
+    set x, 0                      ; Prepare zero for tri-state
+    mov osr, x                    ; Load zero into OSR
+    out pindirs, 8                ; Tri-state D0..D7 (pindirs=0x00)
+.wrap
+
+; ===================================================================
+; msx_p90_read_responder   (EXPERIMENTAL — standard printer port)
+; ===================================================================
+; Answers  IN A,(0x90)  — the STANDARD MSX printer status port — with a
+; constant "ready" byte (0x00, so the BUSY bit is clear). On OCM port 0x90
+; otherwise floats to 0xFF, which BUSY-polling printer software reads as
+; "busy forever" and hangs on. Driving a ready status lets standard-port
+; software (e.g. the file-hunter word processors) proceed; their 0x90/0x91
+; data+strobe writes are already captured by msx_io_write_captor.
+;
+; SELF-CONTAINED and SAFE-BY-DESIGN:
+;   * Address is filtered HERE, in the PIO — it drives D0..D7 ONLY when the
+;     I/O port equals 0x90. Every other I/O read leaves the bus tri-stated,
+;     so there is no contention with the FPGA on VDP/PSG/PPI/etc.
+;   * No /WAIT (owned by the memory responder) and no CPU round-trip — the
+;     response is a constant, produced entirely by the state machine.
+;   * Runs on PIO0 SM2 next to the memory responder (SM0), sharing the D0..D7
+;     GPIO mux. It only ever touches D0..D7 while /IORQ is low (an I/O cycle),
+;     which is exactly when the memory responder (gated on /SLTSL) is idle —
+;     so the two never drive the bus at the same time.
+;
+; Config from C:  in_pins base = A0 (reads A0..A7),  out_pins base = D0 (8),
+;                 jmp_pin = /RD,  and Y preloaded with 0x90 (the port to match).
+
+.program msx_p90_read_responder
+
+.wrap_target
+p90_top:
+    wait 0 gpio 26                ; /IORQ low — an I/O cycle is starting
+    jmp pin p90_top              ; jmp_pin=/RD; /RD high => not a read => respin
+    mov isr, null                ; clear ISR (no stale high bits in the compare)
+    in pins, 8                   ; ISR = A0..A7 (the I/O port number)
+    mov x, isr
+    jmp x!=y p90_top             ; port != 0x90 => do NOT drive, respin
+    mov pins, null               ; preset D0..D7 = 0x00 (value before enabling OE)
+    mov osr, ~null               ; OSR = 0xFFFFFFFF
+    out pindirs, 8               ; pindirs = 0xFF => drive D0..D7 (outputs 0x00)
+    wait 1 gpio 24               ; hold the byte until /RD rises (read cycle ends)
+    mov osr, null                ; OSR = 0
+    out pindirs, 8               ; pindirs = 0x00 => tri-state D0..D7 again
+.wrap

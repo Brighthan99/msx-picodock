@@ -1,0 +1,471 @@
+--- sunride.asm
++++ sunride.asm
+@@ -958,12 +958,468 @@
+ ; must be called instead of CALBAS in MSX BIOS.
+ 
+ DRV_BASSTAT:
++	; ---------------------------------------------------------------
++	; CALL PDASK("...") - ask the host something, print what it says.
++	;
++	;   10 CALL PDASK("give me a haiku about cassette tapes")
++	;   20 A$="what is an msx" : CALL PDASK(A$)
++	;   30 CALL PDASK("search: "+A$)
++	;
++	; This is the standard MSX expanded-statement convention, reached the
++	; standard way: BASIC offers the name to every ROM that has a STATEMENT
++	; entry, the Nextor kernel tries its own CALL commands first, and hands
++	; on what it does not know to the driver here. Cy=1 means "not mine".
++	;
++	; The other end of the conversation is host/pd_ask.py, and the same
++	; protocol without any ROM is msx-tools/pdask.s (PDASK.COM) - which is
++	; how to tell a broken handler from a broken host.
++	;
++	;   MSX -> host                    host -> MSX
++	;     01 LO HI <query>   ask         81 LEN <bytes>   a chunk
++	;     03                 cancel      82               end of answer
++	;     06                 ack         8F CODE          no answer, why
++	;
++	; Every chunk is acknowledged before the next one is sent: the
++	; cartridge RX ring is 1KB and drops what overruns it, so the ack is
++	; what keeps a long answer from arriving with holes in it.
++	;
++	; The mailbox is read straight from page 1 (#7F08-#7F0B). No inter-slot
++	; access is needed - while this runs, page 1 *is* the cartridge.
++	;
++	; Reading the argument (the part that needs the BASIC ROM)
++	; --------------------------------------------------------
++	; The argument is a whole string expression, so it has to be evaluated
++	; by the interpreter - and the interpreter lives at #4000-#7FFF, which
++	; is where *this bank* is while this code runs. Borrowing it back is
++	; what CALBAS is for, and every CALL-extension ROM since the MSX1 disk
++	; ROMs does exactly this (`ld ix,<routine>` / `call CALBAS`).
++	;
++	; The one difference here: the kernel's CALBAS (#403F) rather than the
++	; BIOS one (#0159). Nextor is eight banks sharing page 1, so coming
++	; back means restoring *which bank* as well - and a BASIC error inside
++	; the borrowed call never comes back at all, which is precisely when
++	; that matters. The kernel's wrapper handles both. Its entry points are
++	; byte-identical in all eight banks, so calling it from here works.
++	;
++	; Interrupts come back off from an inter-slot call, hence the EI - the
++	; same EI the Kanji BASIC ROM does after its own CALBAS calls.
++	; ---------------------------------------------------------------
++	; PROCNM holds the name BASIC is asking about, upper-cased and NUL
++	; terminated. Compared against PD_NAME including that NUL, so CALL PDASKX
++	; falls through to the next handler rather than being taken as ours.
++	ld	hl,PD_NAME  
++	ld	de,PD_PROCNM  
++	ld	b,#6			; "PDASK" and the terminator
++PD_NAMECMP:
++	ld	a,(de)
++	cp	(hl)
++	jp	nz,PD_PASS
++	inc	hl
++	inc	de
++	djnz	PD_NAMECMP
++
++	push	hl			; [A] the text exactly as we were given it
++
++	call	PD_SKIPSP
++	cp	#28			; "("
++	jr	z,PD_ARG
++
++	; CALL PDASK on its own. This is the one command that answers "is this
++	; handler reached at all", without a host, a question or a disk - and
++	; it says what the mailbox looks like from in here, which is the other
++	; half of any answer to "nothing happened".
++	or	a			; end of the line?
++	jr	z,PD_DIAG
++	cp	#3A			; ":" - another statement follows
++	jr	z,PD_DIAG
++	ld	de,PD_M_USAGE		; ours by name, but not this shape
++	call	PRINT
++	jp	PD_BAD
++
++PD_DIAG:
++	pop	af			; [A] this statement is ours
++	push	hl			; [C]
++	ld	de,PD_M_HERE
++	call	PRINT
++	call	PD_SIG			; can we read the cartridge signature?
++	ld	de,PD_M_ST
++	call	PRINT
++	ld	a,(PD_MB_ST)
++	call	PD_HEX
++	ld	de,PD_M_CRLF
++	call	PRINT
++	pop	hl			; [C]
++	or	a			; Cy=0: handled
++	ret
++
++PD_ARG:
++	inc	hl
++	call	PD_SKIPSP
++	cp	#22			; a quote? then it is right there in the text
++	jr	z,PD_LIT
++
++	; An expression has to go through the interpreter. Where that leaves the
++	; text pointer is not something to rely on: hardware returned a pointer
++	; sitting on 14h - not the bracket, not one short of it, not the end of
++	; the statement. So the closing bracket is found *here*, before anything
++	; is borrowed, and the interpreter's pointer is simply discarded.
++	push	hl			; [E] where the expression starts
++	call	PD_FIND			; HL -> the matching ")"
++	jr	nc,PD_FOUND
++	pop	hl			; [E] - the stack has to be level before
++	jr	PD_NOCLOSE		; PD_BAD takes [A] off it
++PD_FOUND:
++	inc	hl			; past it: this is where BASIC carries on
++	ex	(sp),hl			; [E] <-> HL: keep that, get the start back
++
++	ld	ix,FRMEVL		; evaluate whatever is in there
++	call	PD_CALBAS		; ...may not come back: a BASIC error
++	ld	a,(PD_VALTYP)		; what came out of it
++	cp	#03			; 3 = string; a number is not a question
++	jr	z,PD_STR
++	ld	de,PD_M_USAGE
++	call	PRINT
++	pop	hl			; [E]
++	jp	PD_BAD
++
++	; The descriptor without a second borrowed call.
++	;
++	; Hardware (2026-08-02) printed dac=00007AF60000 for A$="world": DAC+2
++	; holds F67A, which is TEMPST - the pool BASIC keeps temporary string
++	; descriptors in. So FRMEVL has already left a pointer to the descriptor
++	; where it can simply be read, and FRESTR - the call that did not come
++	; back from here - buys nothing but the tidying up, which the next two
++	; instructions do instead.
++PD_STR:
++	ld	hl,(PD_DAC+2)		; -> [len][addr lo][addr hi]
++	ld	c,(hl)			; C = length
++	inc	hl
++	ld	e,(hl)
++	inc	hl
++	ld	d,(hl)			; DE = the bytes themselves
++	ld	hl,#F67A		; hand the temporaries back: TEMPPT = TEMPST
++	ld	(PD_TEMPPT),hl
++	pop	hl			; [E] = just past the ")"
++	jr	PD_GO
++
++	; A literal needs none of that. BASIC only tokenises keywords, so the
++	; characters between the quotes are sitting in the program text exactly
++	; as they were typed - nothing borrowed, nothing to put back, and no
++	; bank to restore. This is the path that was verified on hardware first,
++	; and it is left exactly as it was.
++PD_LIT:
++	inc	hl			; past the opening quote
++	ld	e,l
++	ld	d,h			; DE = the first character
++	ld	c,#0			; C = how many there are
++PD_SCAN:
++	ld	a,(hl)
++	or	a
++	jp	z,PD_BAD		; the line ended before the quote did
++	cp	#22
++	jr	z,PD_SCANOK
++	inc	hl
++	inc	c
++	jp	z,PD_BAD		; over 255 characters: not sendable as-is
++	jr	PD_SCAN
++PD_SCANOK:
++	inc	hl			; past the closing quote
++	call	PD_SKIPSP
++	cp	#29			; ")"
++	jr	nz,PD_NOCLOSE
++	inc	hl
++
++	; Both paths arrive here: HL = where BASIC carries on, DE -> the query,
++	; C = its length.
++PD_GO:
++	pop	af			; [A] drop it: this statement is ours
++	push	hl			; [C]
++	call	PD_TALK
++	pop	hl			; [C]
++	or	a			; Cy=0: handled
++	ret
++
++	; No closing bracket anywhere. Say so rather than leave a bare Syntax
++	; error - it is the difference between a mistyped line and a pointer
++	; that went somewhere unexpected.
++PD_NOCLOSE:
++	ld	de,PD_M_NOCL
++	call	PRINT
++	jp	PD_BAD
++
++;-----------------------------------------------------------------------------
++; PD_FIND - from (HL), the matching ")". Cy set if the line ends first.
++;
++; Counts brackets and steps over quoted text, so CALL PDASK(MID$(A$,1,3)) and
++; CALL PDASK("a)b") both end up in the right place.
++;-----------------------------------------------------------------------------
++PD_FIND:
++	ld	b,#1			; how deep we are
++PD_F1:
++	ld	a,(hl)
++	or	a
++	jr	z,PD_FNO		; end of the statement
++	cp	#22			; a quoted run: nothing in it counts
++	jr	z,PD_FQ
++	cp	#28			; "("
++	jr	z,PD_FIN
++	cp	#29			; ")"
++	jr	z,PD_FOUT
++PD_FNEXT:
++	inc	hl
++	jr	PD_F1
++PD_FIN:
++	inc	b
++	jr	PD_FNEXT
++PD_FOUT:
++	dec	b
++	jr	nz,PD_FNEXT
++	or	a			; Cy=0: found, HL is on it
++	ret
++PD_FQ:
++	inc	hl
++PD_FQ1:
++	ld	a,(hl)
++	or	a
++	jr	z,PD_FNO
++	cp	#22
++	jr	z,PD_FNEXT		; the closing quote; step past it
++	inc	hl
++	jr	PD_FQ1
++PD_FNO:
+ 	scf
+ 	ret
+ 
++	; Ours by name but not by shape - no brackets, or not a string. Put the
++	; text back where it was and say no, which is what makes BASIC report
++	; the Syntax error it should.
++PD_BAD:
++	pop	hl			; [A]
++PD_PASS:
++	scf
++	ret
+ 
+ ;-----------------------------------------------------------------------------
++; PD_CALBAS - run the BASIC ROM routine in IX, with the bank put back after.
+ ;
++; The kernel's CALBAS, not the BIOS one: this code is in a bank, and coming
++; back has to restore that. See the note at the top of DRV_BASSTAT.
++;-----------------------------------------------------------------------------
++PD_CALBAS:
++	di				; the kernel's timer hook switches banks, and
++	call	CALBAS			; this sequence is in the middle of doing
++	ei				; the same. Not a race worth having.
++	ret
++
++;-----------------------------------------------------------------------------
++; PD_SKIPSP - step HL past spaces; A = the character it stopped on
++;-----------------------------------------------------------------------------
++PD_SKIPSP:
++	ld	a,(hl)
++	cp	#20
++	ret	nz
++	inc	hl
++	jr	PD_SKIPSP
++
++;-----------------------------------------------------------------------------
++; PD_TALK - the whole exchange. DE -> query, C = length.
++;
++; No BASIC routines from here on: this is our bank talking to the mailbox in
++; our bank, with nothing borrowed and nothing to put back.
++;-----------------------------------------------------------------------------
++PD_TALK:
++	ld	a,(PD_MB_ST)
++	and	#04			; USB_CONNECTED
++	jr	nz,PD_ASK
++	ld	de,PD_M_NOHOST		; nobody to ask
++	call	PRINT
++	ld	a,(PD_MB_ST)		; ...and what the mailbox said
++	call	PD_HEX
++	ld	de,PD_M_CRLF
++	jp	PRINT
++
++PD_ASK:
++	ld	a,#01			; the question
++	call	PD_TX
++	ld	a,c
++	call	PD_TX
++	xor	a			; a BASIC string cannot reach 256 characters
++	call	PD_TX
++
++	ld	b,c
++	ld	a,b
++	or	a
++	jr	z,PD_RECV		; CALL PDASK("") - let the host object
++PD_SEND:
++	ld	a,(de)
++	call	PD_TX
++	inc	de
++	djnz	PD_SEND
++
++	; -- and now read the answer, printing it as it arrives --------------
++PD_RECV:
++	call	PD_RX
++	ret	c			; Ctrl+STOP, or the cable went
++	cp	#82			; end of answer
++	ret	z
++	cp	#8F			; no answer, and a reason
++	jr	z,PD_NOANS
++	cp	#81			; a chunk; anything else is noise
++	jr	nz,PD_RECV
++	call	PD_RX
++	ret	c
++	or	a
++	jr	z,PD_ACK		; an empty chunk is still a chunk
++	ld	b,a
++PD_CHUNK:
++	call	PD_RX
++	ret	c
++	call	CHPUT
++	djnz	PD_CHUNK
++PD_ACK:
++	ld	a,#06			; ...and only now the next one
++	call	PD_TX
++	jr	PD_RECV
++
++PD_NOANS:
++	call	PD_RX			; the reason, 1 off / 2 failed / 3 busy
++	ret	c
++	push	af
++	ld	de,PD_M_NOANS
++	call	PRINT
++	pop	af
++	add	a,#30			; one digit is enough - the host logged why
++	call	CHPUT
++	ld	de,PD_M_CRLF
++	jp	PRINT
++
++;-----------------------------------------------------------------------------
++; PD_SIG - print whether the cartridge signature reads back from here.
++;
++; "PDSERIAL" at #7F00 is the firmware answering. If this says no, the bytes at
++; #7F08 are whatever the ROM image happens to hold there and the status below
++; means nothing - which is a different fault from "no host".
++;-----------------------------------------------------------------------------
++PD_SIG:
++	ld	hl,#7F00
++	ld	de,PD_SIGTXT
++	ld	b,#08
++PD_SIG1:
++	ld	a,(de)
++	cp	(hl)
++	jr	nz,PD_SIGNO
++	inc	hl
++	inc	de
++	djnz	PD_SIG1
++	ld	de,PD_M_SIGY
++	jp	PRINT
++PD_SIGNO:
++	ld	de,PD_M_SIGN
++	jp	PRINT
++
++;-----------------------------------------------------------------------------
++; PD_HEX - A as two hex digits
++;-----------------------------------------------------------------------------
++PD_HEX:
++	push	af
++	rrca
++	rrca
++	rrca
++	rrca
++	call	PD_HEX1
++	pop	af
++PD_HEX1:
++	and	#0F
++	add	a,#30
++	cp	#3A
++	jr	c,PD_HEX2
++	add	a,#07
++PD_HEX2:
++	jp	CHPUT
++
++;-----------------------------------------------------------------------------
++; PD_TX - send A to the host. Preserves BC and DE.
++;
++; Spins while the ring is full, but only while there is a host on the other
++; end to empty it: with the cable out that would be for ever.
++;-----------------------------------------------------------------------------
++PD_TX:
++	push	bc
++	ld	b,a
++PD_TXW:
++	ld	a,(PD_MB_ST)
++	and	#06			; TX_FULL | USB_CONNECTED
++	cp	#06
++	jr	z,PD_TXW
++	ld	a,b
++	ld	(PD_MB_TX),a
++	pop	bc
++	ret
++
++;-----------------------------------------------------------------------------
++; PD_RX - the next byte from the host into A. Cy set if we gave up.
++;
++; Waits as long as it takes: on the other end a person may be typing the
++; answer, and there is no honest timeout for that. Ctrl+STOP is the way out,
++; and the host is told so it stops waiting too. INTFLG is left alone on
++; purpose, so BASIC reports the Break the user asked for.
++;-----------------------------------------------------------------------------
++PD_RX:
++	ld	a,(PD_MB_ST)
++	and	#01			; RX_READY?
++	jr	nz,PD_RXGOT
++	ld	a,(PD_INTFLG)
++	cp	#03			; Ctrl+STOP
++	jr	z,PD_RXSTOP
++	ld	a,(PD_MB_ST)
++	and	#04			; still a host there?
++	jr	nz,PD_RX
++	ld	de,PD_M_LOST
++	call	PRINT
++	scf
++	ret
++
++PD_RXSTOP:
++	ld	a,#03			; cancel, so the host is not left waiting
++	call	PD_TX
++	scf
++	ret
++
++PD_RXGOT:
++	ld	a,(PD_MB_RX)
++	ld	(PD_MB_ACK),a		; the value written is ignored
++	or	a			; Cy=0: this is a byte, not a giving-up
++	ret
++
++PD_NAME:	db	"PDASK",0	; the name this answers to
++
++PD_PROCNM	equ	#FD89		; the CALL name BASIC is asking about
++PD_VALTYP	equ	#F663		; what FRMEVL just produced: 3 = string
++PD_DAC		equ	#F7F6		; ...and where it left it: DAC+2 -> descriptor
++PD_TEMPPT	equ	#F678		; next free temporary descriptor (TEMPST pool)
++PD_INTFLG	equ	#FC9B		; 3 = Ctrl+STOP was pressed
++FRMEVL		equ	#4C64		; BASIC: evaluate an expression at (HL)
++FRESTR		equ	#67D0		; BASIC: free the temporary, HL -> descriptor
++PD_MB_ST	equ	#7F08		; mailbox STATUS   (firmware MMIO, page 1)
++PD_MB_RX	equ	#7F09		; RX_DATA, pure read
++PD_MB_TX	equ	#7F0A		; TX_DATA
++PD_MB_ACK	equ	#7F0B		; RX_ACK
++
++PD_SIGTXT:	db	"PDSERIAL"
++PD_M_HERE:	db	13,10,"PDASK here, ",0
++PD_M_SIGY:	db	"cart=yes, ",0
++PD_M_SIGN:	db	"cart=NO, ",0
++PD_M_ST:	db	"status=",0
++PD_M_USAGE:	db	13,10,"PDASK: needs a string - CALL PDASK(...)",13,10,0
++PD_M_NOCL:	db	13,10,"PDASK: no closing )",13,10,0
++PD_M_NOHOST:	db	13,10,"PDASK: no host, status=",0
++PD_M_LOST:	db	13,10,"PDASK: the host went away",13,10,0
++PD_M_NOANS:	db	13,10,"PDASK: no answer, reason ",0
++PD_M_CRLF:	db	13,10,0
++
++
++;-----------------------------------------------------------------------------
++;
+ ; BASIC expanded device handler.
+ ; Works the expected way, except that CALBAS in kernel page 0
+ ; must be called instead of CALBAS in MSX BIOS.
