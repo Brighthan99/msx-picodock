@@ -1,0 +1,23 @@
+--- sunride.patched.asm
++++ sunride.patched.asm
+@@ -2502,7 +2502,19 @@
+ 
+ .hasTimer:
+ 	push	bc
+-	ld	b,1*4			; 1s
++	; PicoDock: 1s -> 6s.
++	;
++	; This disk lives on the host; the cartridge fakes it over USB. Picking
++	; Nextor from the menu reboots the RP2040, so USB re-enumerates - and the
++	; Mac creating the port, the server reattaching and DTR rising takes more
++	; than a second. Until then the cartridge does not know the capacity and
++	; holds IDENTIFY in BSY; at 1s the driver gave up and printed <failed>.
++	; Measured 2026-09-12.
++	;
++	; A real disk answers well inside 1s. One on the far side of a host link
++	; does not. The cost is that a genuinely absent device now takes 6s to
++	; report itself missing.
++	ld	b,6*4			; 6s
+ .twait1:
+ 	ld	a,(IDE_STATUS)
+ 	and	M_BSY

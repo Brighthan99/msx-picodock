@@ -17,7 +17,10 @@ for f in NEXTOR.SYS COMMAND2.COM PDSYNC.COM PDFRCPRN.COM; do
   fi
 done
 
-if [ -f dist/disk/system/PDSYNC.COM ]; then
+# make_pdsync.py is Python and only in the development tree. Where it is not,
+# there is nothing to cross-check against, and that is not a failure.
+if [ -f dist/disk/system/PDSYNC.COM ] && [ -f src/msx-tools/make_pdsync.py ] \
+   && command -v python3 >/dev/null 2>&1; then
   ref="$(mktemp)"
   trap 'rm -f "$ref"' EXIT
   if python3 src/msx-tools/make_pdsync.py "$ref" >/dev/null 2>&1; then

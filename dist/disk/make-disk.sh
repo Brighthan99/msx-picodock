@@ -10,7 +10,7 @@
 # The disk beside this script is already built with these defaults, so you only
 # need this for a different size, a second disk, or a fresh one after filling
 # the first. It refuses to overwrite an image that exists - use sync-disk.sh to
-# update one in place. Needs Python 3 and nothing else.
+# update one in place. Needs Node.js and nothing else.
 #
 # What goes on is the two folders beside this script:
 #
@@ -24,7 +24,7 @@
 # system/ wins: a file in user-files/ whose name system/ already uses is left
 # out, and said so, rather than quietly replacing the half that has to boot.
 #
-# The rules live in tools/build_disk.py, not here. make-disk.bat needs the same
+# The rules live in ../node/bin/build_disk.js, not here. make-disk.bat needs the same
 # ones and cannot call a .sh, so there is one implementation and four thin
 # wrappers rather than two that drift.
 #
@@ -40,12 +40,10 @@ VOL="${3:-MSXDISK}"
 case "$OUT" in "" ) ;; /*) ;; *) OUT="$FROM/$OUT" ;; esac
 cd "$HERE"
 
-[ -e tools/build_disk.py ] || {
-  echo "[-] tools/build_disk.py is missing."
-  echo "    tools/ is staged from src/host/ by ./src/stage_dist.sh - run that."
-  exit 1; }
+DIST="$HERE/.."
+. "$DIST/need-node.sh"
 
-python3 tools/build_disk.py make . "$SIZE" "${OUT:-picodock.img}" "$VOL"
+node "$NODEDIR/bin/build_disk.js" make . "$SIZE" "${OUT:-picodock.img}" "$VOL"
 rc=$?
 [ "$rc" = 0 ] || exit "$rc"
 

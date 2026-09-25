@@ -42,6 +42,15 @@ for t in "$HERE"/test_*.sh; do
   echo
 done
 
+# 펌웨어에서 SDK 없이 쓸 수 있는 부분은 PC 에서 돈다. 이것이 중요한 이유는
+# 나머지와 다르다 - 펌웨어가 틀린 것은 **구운 뒤에야** 드러나고, 굽는 데는
+# MSX 를 끄고 카트리지를 뽑아야 한다.
+if [ -x src/picoverse-picodock/tests/run.sh ]; then
+  echo "=== firmware tests ==="
+  if ./src/picoverse-picodock/tests/run.sh; then :; else fail=1; fi
+  echo
+fi
+
 if [ -x src/host/tests/run.sh ]; then
   echo "=== host tests ==="
   if ./src/host/tests/run.sh; then :; else fail=1; fi

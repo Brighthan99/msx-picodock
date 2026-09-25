@@ -78,6 +78,7 @@ OP_CANCEL = 0x03
 OP_ACK    = 0x06
 OP_CHUNK  = 0x81
 OP_END    = 0x82
+OP_SAY    = 0x83                ; the answer was sent as sound too
 OP_ERR    = 0x8F
 
 KEY_ESC  = 0x1B
@@ -171,6 +172,8 @@ found:
 ;=============================================================================
 ; Ask: 01 LO HI then the query bytes.
 ;=============================================================================
+        call    pd_play_init
+
 send_query:
         ld      e,#OP_REQ
         call    mb_send
@@ -201,16 +204,22 @@ q_loop:
 ;=============================================================================
 recv_loop:
         call    mb_get
-        jr      c,cancelled
+        jp      c,cancelled             ; jp 인 이유는 아래 answered 와 같다
         cp      #OP_END
-        jr      z,answered
+        jp      z,answered              ; jp, not jr - answered grew past 127
         cp      #OP_ERR
-        jr      z,refused
+        jp      z,refused
+        cp      #OP_SAY
+        jr      nz,not_say
+        ld      a,#1
+        ld      (say_it),a              ; the host says there is sound coming
+        jp      recv_loop
+not_say:
         cp      #OP_CHUNK
         jr      nz,recv_loop            ; noise, or a frame we do not know: resync
 
         call    mb_get                  ; chunk length
-        jr      c,cancelled
+        jp      c,cancelled
         or      a
         jr      z,chunk_done            ; an empty chunk is still a chunk
         ld      b,a
@@ -218,7 +227,7 @@ chunk_loop:
         push    bc
         call    mb_get
         pop     bc
-        jr      c,cancelled
+        jp      c,cancelled
         call    putchar
         djnz    chunk_loop
 chunk_done:
@@ -226,15 +235,67 @@ chunk_done:
         call    mb_send
         jr      recv_loop
 
+; **Samples, not text.** The host can hand the whole utterance over this
+; channel instead of streaming it into the cartridge's ring. It is slower -
+; one ACK round trip every 128 bytes - but once it is here, playing it reads
+; nothing from the bus at all, which is the one part of the streaming path
+; whose timing is not ours.
+;
+; Whatever does not fit is dropped rather than wrapped. A buffer that wraps
+; plays the end of the sentence over the beginning, which sounds like a fault
+; in the synthesiser.
 answered:
         call    crlf
+
+;-----------------------------------------------------------------------------
+; The answer may also have been sent as sound.
+;
+; **The host cannot play it.** It can only put samples in the cartridge's ring;
+; nothing takes them out unless a Z80 loop reads 0x7F0C. Without what follows,
+; asking with `--reply voice` filled the ring once and stopped - the host waited
+; for room that never came, and every later sentence was refused as "still
+; saying the last one". Silence, with no error anywhere.
+;
+; **The host says so (0x83); we do not guess from the ring.** Guessing was
+; tried: look at the window, and if it says READY, play. But the ring holds
+; whatever was last put there, and after a stream nobody finished that is the
+; middle of an old sentence - a second of noise and then nothing. What is in
+; the ring cannot tell you whether it is yours.
+;-----------------------------------------------------------------------------
+        ld      a,(say_it)
+        or      a
+        jp      z,quit                  ; text only: nothing to play
+
+        call    pd_play_init
+        ld      hl,#msg_saying
+        call    puts
+        ; **먼저 기다린다.** 0x83 은 "온다" 이지 "왔다" 가 아니다 - 합성에
+        ; 몇 초가 걸리고, 빈 링에 대고 시작하면 마지막 레벨을 붙들고 있다가
+        ; 2 초 뒤에 포기한다. 실기에서 그렇게 됐고, 정작 소리는 그 4 초 뒤에
+        ; 도착했다.
+        call    pd_wait_ready
+        jr      c,say_nothing
+        call    pd_play
+        jr      c,say_refused
+        and     #V_UNDERRUN
+        jp      z,quit
+        ld      hl,#msg_gaps
+        call    puts
+        jp      quit
+say_refused:
+        ld      hl,#msg_nosay
+        call    puts
+        jp      quit
+say_nothing:
+        ld      hl,#msg_nosound
+        call    puts
         jp      quit
 
 refused:
         call    mb_get                  ; the reason, as a number
-        jr      c,cancelled
+        jp      c,cancelled
         push    af
-        call    crlf
+        ; 빈 줄은 msg_asked 가 이미 냈다. 여기서 또 내면 둘이 된다.
         ld      hl,#msg_refused
         call    puts
         pop     af
@@ -262,7 +323,7 @@ quit:
 ;=============================================================================
 check_slot:
         push    bc                      ; B/C carry the caller's slot counters
-        ld      (slot),a
+        ld      (pd_slot),a
         ld      de,#sig
         ld      hl,#SIG_ADDR
         ld      b,#8
@@ -270,7 +331,7 @@ cs_loop:
         push    bc
         push    de
         push    hl
-        ld      a,(slot)
+        ld      a,(pd_slot)
         call    RDSLT                   ; A = byte, modifies BC/DE
         pop     hl
         pop     de
@@ -300,7 +361,7 @@ mb_status:
         push    bc
         push    de
         push    hl
-        ld      a,(slot)
+        ld      a,(pd_slot)
         ld      hl,#ST_ADDR
         call    RDSLT
         pop     hl
@@ -332,11 +393,11 @@ mg_wait:
         jr      mg_wait
 
 mg_take:
-        ld      a,(slot)
+        ld      a,(pd_slot)
         ld      hl,#RX_ADDR
         call    RDSLT                   ; A = byte
         push    af
-        ld      a,(slot)
+        ld      a,(pd_slot)
         ld      hl,#ACK_ADDR
         ld      e,#0                    ; the value is ignored by RX_ACK
         call    WRSLT
@@ -381,7 +442,7 @@ tx_go:
         push    de
         push    hl
         ld      hl,#TX_ADDR
-        ld      a,(slot)
+        ld      a,(pd_slot)
         call    WRSLT                   ; E = byte
 tx_out:
         pop     hl
@@ -442,7 +503,7 @@ ph_out:
 ; Data
 ;=============================================================================
 sig:            .ascii  "PDSERIAL"
-slot:           .db     0
+say_it:         .db     0       ; the host sent sound as well (0x83)
 query:          .dw     0
 query_len:      .db     0
 
@@ -453,6 +514,15 @@ msg_usage:      .ascii  "PDASK - ask the host something."
                 .ascii  "The host answers: someone types it, or a search does."
                 .db     0x0D, 0x0A
                 .ascii  "$"
+msg_saying:     .db     13,10           ; 답과 사이에 빈 줄 (answered 가 줄을 끝냈다)
+                .ascii  "Speaking... (ESC to stop waiting)"
+                .db     13,10,'$'
+msg_nosound:    .ascii  "(no sound arrived)"
+                .db     13,10,'$'
+msg_gaps:       .ascii  "(the sound had gaps - the host fell behind)"
+                .db     13,10,'$'
+msg_nosay:      .ascii  "(could not play it: the stack is in page 1)"
+                .db     13,10,'$'
 msg_notfound:   .ascii  "No PicoDock found - is the firmware flashed?"
                 .db     0x0D, 0x0A
                 .ascii  "$"
@@ -461,8 +531,10 @@ msg_nohost:     .ascii  "The cartridge is here but no host is - plug in the USB"
                 .ascii  "cable and start serve.sh."
                 .db     0x0D, 0x0A
                 .ascii  "$"
+; 단락 사이에 빈 줄 하나: asked / 답 / Speaking. 붙어 있으면 한 덩어리로
+; 읽혀 답이 어디서 시작하는지 눈으로 찾아야 했다 (실기, 2026-09-24).
 msg_asked:      .ascii  "asked - waiting (ESC gives up)"
-                .db     0x0D, 0x0A
+                .db     0x0D, 0x0A, 0x0D, 0x0A
                 .ascii  "$"
 msg_refused:    .ascii  "No answer. Reason 0x$"
 msg_cancel:     .ascii  "Gave up."
@@ -470,3 +542,9 @@ msg_cancel:     .ascii  "Gave up."
                 .ascii  "$"
 msg_crlf:       .db     0x0D, 0x0A
                 .ascii  "$"
+
+; **이 셋이 마지막이고, 뒤에 아무것도 오지 않는다.** 표는 prog_end 다음 첫
+; 페이지 경계로 옮겨지므로, 뒤에 무엇을 두면 pd_play_init 이 도는 순간 덮인다.
+        .include "pdplay.inc"
+        .include "psgvol_table.inc"
+prog_end:

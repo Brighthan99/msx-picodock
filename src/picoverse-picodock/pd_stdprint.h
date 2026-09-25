@@ -1,7 +1,7 @@
 // pd_stdprint.h — STANDARD MSX printer port capture (ports 0x90 / 0x91).
 //
 // This is the WRITE half of standard-printer-port support; the READ half (the
-// BUSY status answered on IN 0x90) lives in msx_bus.pio (msx_p90_read_responder).
+// BUSY status answered on IN 0x90) lives in msx_bus.pio (msx_status_read_responder).
 // Together they let software that drives the Centronics port directly — the
 // file-hunter word processors, LPRINT without the H.LPTO hook, etc. — print
 // through PicoDock, on the machine's real printer ports rather than PicoDock's

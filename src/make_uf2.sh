@@ -50,23 +50,19 @@ esac
 # from "flashing is broken" when a cartridge stops booting.
 FWBIN="${FWBIN_OVERRIDE:-$FWBIN}"
 
-# NEXTOR=off (default) | sunrise | mapper | both
-#   Adds a Nextor entry to the menu, which is what boots the virtual disk (D4).
-#     sunrise : "PicoDock Disk (Nextor)"             (mapper 10)
-#     mapper  : "PicoDock Disk+192K Mapper"          (mapper 11)
-#     both    : both entries in one image
+# NEXTOR=off (default) | on
+#   Adds the Nextor entry to the menu, which is what boots the virtual disk (D4):
+#   "PicoDock Disk (Nextor)", mapper 11 - Nextor plus its own 192KB mapper.
+#   sunrise, mapper and both are accepted and mean the same; they are the names
+#   from when there were two entries.
 #
-# `both` is the useful one on a cartridge that moves between machines. A machine
-# with its own memory mapper (OCM, MSX2+ and most MSX2 with 128K+) boots the
-# first entry and keeps the printer. A machine without one - Sony HB-F1XD and
-# every other 64K MSX2 - needs the second: Nextor loads NEXTOR.SYS only in
+# One entry, the one with the mapper, because a machine without its own - Sony
+# HB-F1XD and every other 64K MSX2 - needs it: Nextor loads NEXTOR.SYS only in
 # DOS2 mode, DOS2 mode needs mapped RAM, and without it the kernel falls back to
 # looking for MSX-DOS 1 files that are not on the disk. The symptom is a drop
-# straight to BASIC, which looks like the cartridge failed and is not.
+# straight to BASIC, which looks like the cartridge failed and is not. A machine
+# that has a mapper of its own is unaffected by carrying a second.
 #
-# The cost of the second entry is 128KB of flash (its own copy of the kernel
-# ROM) and, while it is running, the printer: the mapper's page registers live
-# at I/O FC-FF and PIO1 is already spoken for.
 #   Without this the menu only lists ROMs and there is nothing to boot Nextor with.
 NEXTOR="${NEXTOR:-off}"
 case "$NEXTOR" in

@@ -1,6 +1,6 @@
 --- sunride.asm
 +++ sunride.asm
-@@ -958,12 +958,468 @@
+@@ -958,12 +958,480 @@
  ; must be called instead of CALBAS in MSX BIOS.
  
  DRV_BASSTAT:
@@ -53,18 +53,30 @@
 +	; PROCNM holds the name BASIC is asking about, upper-cased and NUL
 +	; terminated. Compared against PD_NAME including that NUL, so CALL PDASKX
 +	; falls through to the next handler rather than being taken as ours.
++	; **HL is the BASIC text pointer and it is ours to give back.** Saving it
++	; here is not tidiness: the name comparison below needs HL for the table,
++	; and everything after the match reads the statement through HL. Loading
++	; the table into it first - which is what this did - left PD_SKIPSP
++	; reading the ROM just past "PDASK\0". The byte there is not "(", so
++	; `CALL PDASK("x")` answered "needs a string", and the not-ours path
++	; handed the next handler a pointer into our name table, which is why
++	; `CALL SYSTEM` said Syntax error. One clobber, both symptoms.
++	; (Found on hardware 2026-09-23. tasks.md:472 is the same lesson from
++	; the printer hook: a broken text pointer reads as "Syntax error".)
++	push	hl			; [A] the text exactly as we were given it
 +	ld	hl,PD_NAME  
 +	ld	de,PD_PROCNM  
 +	ld	b,#6			; "PDASK" and the terminator
 +PD_NAMECMP:
 +	ld	a,(de)
 +	cp	(hl)
-+	jp	nz,PD_PASS
++	jp	nz,PD_BAD		; not ours - PD_BAD puts [A] back first
 +	inc	hl
 +	inc	de
 +	djnz	PD_NAMECMP
 +
-+	push	hl			; [A] the text exactly as we were given it
++	pop	hl			; [A] the text, back in the register that reads it
++	push	hl			; [A] again - PD_DIAG/PD_GO/PD_BAD still drop it
 +
 +	call	PD_SKIPSP
 +	cp	#28			; "("
@@ -469,3 +481,4 @@
  ; BASIC expanded device handler.
  ; Works the expected way, except that CALBAS in kernel page 0
  ; must be called instead of CALBAS in MSX BIOS.
+

@@ -30,16 +30,10 @@ goto parse
 
 cd /d "%HERE%"
 
-rem "python" on Windows may be the Store placeholder rather than Python.
-rem find-python.bat works out what actually runs, and says what to do when
-rem nothing does.
-call "%HERE%\..\find-python.bat"
-if not defined PY exit /b 1
-if not exist "tools\build_disk.py" (
-  echo [-] tools\build_disk.py is missing.
-  echo     tools\ is staged from src/host/ by src\stage_dist.sh - run that.
-  exit /b 1
-)
+rem find-node.bat checks for Node.js and says what to install when it is
+rem missing.
+call "%HERE%\..\find-node.bat"
+if not defined NODE exit /b 1
 if not exist "%IMAGE%" (
   echo [-] no disk image at %IMAGE%
   echo     make one first:  make-disk.bat
@@ -65,7 +59,7 @@ if /i "%REPLY%"=="n" goto stopped
 if /i "%REPLY%"=="no" goto stopped
 :go
 
-%PY% "tools\build_disk.py" sync . "%IMAGE%" || exit /b 1
+%NODE% "%NODEDIR%\bin\build_disk.js" sync . "%IMAGE%" || exit /b 1
 
 echo.
 echo     Now run PDSYNC on the MSX.

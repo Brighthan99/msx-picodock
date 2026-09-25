@@ -13,9 +13,8 @@ rem Leave it running while you use the MSX. Start it before switching the MSX
 rem on - it says it is waiting until the cartridge appears, and sits through
 rem resets and reflashing. Ctrl-C when you are done.
 rem
-rem Needs Python 3 and pyserial. The split-screen view also needs curses, which
-rem Windows Python does not ship: `pip install windows-curses`. Without it the
-rem server says so and falls back to plain output rather than failing.
+rem Needs Node.js 18 or newer. The serial-port package is fetched the first time
+rem this runs; setup.bat does it ahead of time if you prefer.
 rem ---------------------------------------------------------------------------
 setlocal
 set "HERE=%~dp0"
@@ -42,20 +41,15 @@ goto parse
 
 cd /d "%HERE%"
 
-rem "python" on Windows may be the Store placeholder rather than Python.
-rem find-python.bat works out what actually runs, and says what to do when
-rem nothing does.
-call "%HERE%\..\find-python.bat"
-if not defined PY exit /b 1
+rem find-node.bat checks for Node.js and says what to install when it is
+rem missing.
+set "NEED_PACKAGES=1"
+call "%HERE%\..\find-node.bat"
+if not defined NODE exit /b 1
 
-if not exist "tools\pd_diskserver.py" (
-  echo [-] tools\pd_diskserver.py is missing.
-  echo     tools\ is staged from src/host/ by src\stage_dist.sh - run that.
-  exit /b 1
-)
 rem A fresh clone has no picodock.img, so build one rather than stopping. No
 rem image is shipped: it would be a hundred-odd megabytes of mostly nothing in
-rem the repository, and making one needs only Python, which you already have to
+rem the repository, and making one needs only Node.js, which you already have to
 rem have to be here. Building also picks up whatever is in user-files\ already.
 if not exist "%IMAGE%" if /i "%IMAGE%"=="picodock.img" if exist "make-disk.bat" (
   echo [*] no picodock.img yet - building one
@@ -69,5 +63,7 @@ if not exist "%IMAGE%" (
 
 rem ..\output, relative to this script, is dist\output - the same folder
 rem serve.sh writes to, and the same three characters on every machine.
-%PY% "tools\pd_diskserver.py" "%IMAGE%" --tui --output "..\output"%ARGS%
+rem Yours first: the server takes the first value it is given, so what follows
+rem are only the defaults - see serve.sh for what they are and why.
+%NODE% "%NODEDIR%\bin\pdserve.js" "%IMAGE%"%ARGS% --out "..\output" --print auto --spool --web
 endlocal

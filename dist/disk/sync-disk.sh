@@ -18,7 +18,7 @@
 # image, waits for confirmation, and releases it afterwards, so the two never
 # write at once.
 #
-# The work is tools/build_disk.py, the same file make-disk.sh calls. sync-disk.bat
+# The work is ../node/bin/build_disk.js, the same file make-disk.sh calls. sync-disk.bat
 # needs the same rules and cannot call a .sh, so there is one implementation and
 # four thin wrappers rather than two that drift - and a disk built one way and
 # updated the other cannot end up different.
@@ -44,12 +44,8 @@ done
 
 cd "$HERE"
 
-for f in tools/build_disk.py tools/stage_user_files.py; do
-  [ -e "$f" ] || {
-    echo "[-] $f is missing."
-    echo "    tools/ is staged from src/host/ by ./src/stage_dist.sh - run that."
-    exit 1; }
-done
+DIST="$HERE/.."
+. "$DIST/need-node.sh"
 
 [ -f "$IMAGE" ] || {
   echo "[-] no disk image at $IMAGE"
@@ -100,12 +96,7 @@ if [ "$ASSUME_YES" = 0 ]; then
   fi
 fi
 
-[ -e tools/build_disk.py ] || {
-  echo "[-] tools/build_disk.py is missing."
-  echo "    tools/ is staged from src/host/ by ./src/stage_dist.sh - run that."
-  exit 1; }
-
-python3 tools/build_disk.py sync . "$IMAGE" || exit 1
+node "$NODEDIR/bin/build_disk.js" sync . "$IMAGE" || exit 1
 
 cat <<'TXT'
 

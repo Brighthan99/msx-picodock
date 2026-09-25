@@ -146,6 +146,25 @@ bool __not_in_flash_func(sunrise_ide_handle_read)(sunrise_ide_t *ide, uint16_t a
 // Initialises TinyUSB, polls for MSC devices, and services IDE read/write requests.
 void __not_in_flash_func(sunrise_usb_task)(void);
 
+// 호스트 프레임 파서를 IDE 없이 설치한다. 부팅 때 한 번 부른다 - 그래야
+// 어느 ROM 이 돌든 호스트의 CTRL(PSG·MIDI-PAC·악기)이 닿는다.
+void sunrise_usb_init_hostlink(void);
+
+// --- 음성 (pd_voice_win.h) ---------------------------------------------------
+// 링은 여기 한 개만 있다. 버스 핸들러(core0)가 읽어 내가고 호스트(core1)가
+// 채우므로, 둘 다 같은 것을 가리켜야 한다.
+// pd_voice_t 는 이름 없는 구조체의 typedef 라 전방 선언이 안 된다 - 헤더를
+// 들인다. SDK 를 끌고 오지 않으므로 싸다.
+#include "pd_voice_win.h"
+
+// 링은 하나뿐이고 버스 핸들러가 직접 만진다 - 전역인 이유는 sunrise_ide.c 의
+// 정의 옆에 적어 두었다. 부팅 때 sunrise_ide_init() 이 한 번 씻는다.
+extern pd_voice_t sunrise_voice_ring;
+
+// 링에 남은 자리를 호스트에게 알린다. core1 폴링 루프에서 부른다 - 흐름
+// 제어가 여기에 달려 있다.
+void sunrise_voice_tick(void);
+
 // Set the pointer to the shared IDE context for the USB task (call before launching core 1).
 void sunrise_usb_set_ide_ctx(sunrise_ide_t *ide);
 

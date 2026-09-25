@@ -30,6 +30,8 @@
 #include "pd_usb.h"
 #include "pd_mailbox.h"
 #include "pd_stdprint.h"
+#include "pd_midipac.h"
+#include "pd_msxmidi.h"
 #include "msx_bus.pio.h"
 
 // config area and buffer for the ROM data
@@ -82,18 +84,25 @@ typedef struct {
     uint sm_write;
     uint offset_read;
     uint offset_write;
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+    uint offset_status;     // msx_status_read_responder, shared by SM2 and SM3
+#endif
 #ifdef PD_P90_READ
     uint sm_p90;            // PIO0 SM2: standard-printer-port (0x90) status responder
-    uint offset_p90;
+#endif
+#ifdef PD_MIDI_STATUS
+    uint sm_e9;             // PIO0 SM3: MSX-MIDI (0xE9) status responder
 #endif
 } msx_pio_bus_t;
 
 static msx_pio_bus_t msx_bus;
 static uint32_t rom_cached_size = 0;
 static bool msx_bus_programs_loaded = false;
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+static bool msx_bus_status_loaded = false;
+#endif
 #ifdef PD_P90_READ
 #define STD_PRN_STATUS_PORT 0x90u   // MSX standard printer status port (IN => BUSY bit1)
-static bool msx_bus_p90_loaded = false;
 #endif
 
 // I/O bus context (PIO1) for memory mapper port access
@@ -185,6 +194,58 @@ static inline void __not_in_flash_func(prepare_rom_source)(
     *available_length_out = available_length;
 }
 
+static void msx_pio_io_write_captor_init(void);
+
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+// One constant-status responder on PIO0: `sm` answers reads of `port`, and
+// `set_count` says how many of D0.. the program's `set pins, 5` reaches - 0
+// answers 0x00, 5 answers 0x05 (see msx_status_read_responder). `busdir` has it
+// pull /BUSDIR low while it answers, which a real MSX needs before the byte
+// gets through its slot buffer. Left DISABLED: each is armed only by its knock
+// (status_knock_write), after an MSX-side tool has checked that nothing else
+// answers that port.
+static void status_responder_init(uint sm, uint8_t port, uint set_count, bool busdir)
+{
+    pio_sm_set_enabled(msx_bus.pio, sm, false);
+    pio_sm_clear_fifos(msx_bus.pio, sm);
+    pio_sm_restart(msx_bus.pio, sm);
+
+    pio_sm_config cfg = msx_status_read_responder_program_get_default_config(msx_bus.offset_status);
+    sm_config_set_in_pins(&cfg, PIN_A0);                 // read A0..A7 (port number)
+    sm_config_set_in_shift(&cfg, false, false, 8);       // shift left, no autopush
+    sm_config_set_out_pins(&cfg, PIN_D0, 8);             // drive D0..D7
+    sm_config_set_set_pins(&cfg, PIN_D0, set_count);     // 0: answer 0x00, 5: answer 0x05
+    sm_config_set_out_shift(&cfg, true, false, 32);      // shift right, no autopull
+    sm_config_set_jmp_pin(&cfg, PIN_RD);                 // jmp pin = /RD
+    if (busdir)
+        sm_config_set_sideset_pins(&cfg, PIN_BUSSDIR);   // side 1/0 = drive low / release
+    else
+        sm_config_set_sideset(&cfg, 0, false, false);    // off; the side bits become delays
+    sm_config_set_clkdiv(&cfg, 1.0f);
+    pio_sm_init(msx_bus.pio, sm, msx_bus.offset_status, &cfg);
+
+    // Start tri-stated (input). D0..D7 are already pio_gpio_init'd to pio0.
+    pio_sm_set_consecutive_pindirs(msx_bus.pio, sm, PIN_D0, 8, false);
+
+    if (busdir)
+    {
+        // Open drain, as /WAIT: the level is latched low once and only the
+        // direction moves. Released before the pin is handed to the PIO, so
+        // taking it over cannot glitch the line low.
+        pio_sm_set_pins_with_mask(msx_bus.pio, sm, 0u, 1u << PIN_BUSSDIR);
+        pio_sm_set_pindirs_with_mask(msx_bus.pio, sm, 0u, 1u << PIN_BUSSDIR);
+        pio_gpio_init(msx_bus.pio, PIN_BUSSDIR);
+    }
+
+    // Preload scratch Y with the port to match: put -> pull -> mov y, osr.
+    pio_sm_put(msx_bus.pio, sm, port);
+    pio_sm_exec(msx_bus.pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(msx_bus.pio, sm, pio_encode_mov(pio_y, pio_osr));
+
+    pio_sm_set_enabled(msx_bus.pio, sm, false);
+}
+#endif
+
 static void msx_pio_bus_init(void)
 {
     msx_bus.pio = pio0;
@@ -234,50 +295,42 @@ static void msx_pio_bus_init(void)
     pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_read, PIN_D0, 8, false);
     pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_write, PIN_D0, 8, false);
 
-#ifdef PD_P90_READ
-    // --- answer IN A,(0x90) with a constant "ready" status (OCM-only-safe) ----
-    // Self-contained responder on PIO0 SM2. It shares the D0..D7 GPIO mux set up
-    // just above (those pins are pio_gpio_init'd to msx_bus.pio = pio0), and only
-    // ever drives them during an I/O read of exactly port 0x90 — every other I/O
-    // read is left tri-stated, so there is no bus contention with the FPGA.
-    // Address filtering happens inside the PIO (no /WAIT, no CPU round-trip), so
-    // this adds nothing to the disk/memory hot path.
-    msx_bus.sm_p90 = 2;
-    if (!msx_bus_p90_loaded)
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+    // --- constant-status responders on PIO0 (see msx_status_read_responder) ----
+    // Self-contained: each only ever drives D0..D7 during an I/O read of exactly
+    // its port - every other I/O read is left tri-stated. Address filtering
+    // happens inside the PIO (no /WAIT, no CPU round-trip), so this adds nothing
+    // to the disk/memory hot path. Both start DISABLED.
+    if (!msx_bus_status_loaded)
     {
-        msx_bus.offset_p90 = pio_add_program(msx_bus.pio, &msx_p90_read_responder_program);
-        msx_bus_p90_loaded = true;
+        msx_bus.offset_status = pio_add_program(msx_bus.pio, &msx_status_read_responder_program);
+        msx_bus_status_loaded = true;
     }
-    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_p90, false);
-    pio_sm_clear_fifos(msx_bus.pio, msx_bus.sm_p90);
-    pio_sm_restart(msx_bus.pio, msx_bus.sm_p90);
-
-    pio_sm_config cfg_p90 = msx_p90_read_responder_program_get_default_config(msx_bus.offset_p90);
-    sm_config_set_in_pins(&cfg_p90, PIN_A0);                 // read A0..A7 (port number)
-    sm_config_set_in_shift(&cfg_p90, false, false, 8);       // shift left, no autopush
-    sm_config_set_out_pins(&cfg_p90, PIN_D0, 8);             // drive D0..D7
-    sm_config_set_out_shift(&cfg_p90, true, false, 32);      // shift right, no autopull
-    sm_config_set_jmp_pin(&cfg_p90, PIN_RD);                 // jmp pin = /RD
-    sm_config_set_clkdiv(&cfg_p90, 1.0f);
-    pio_sm_init(msx_bus.pio, msx_bus.sm_p90, msx_bus.offset_p90, &cfg_p90);
-
-    // Start tri-stated (input). D0..D7 are already pio_gpio_init'd to pio0 above.
-    pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_p90, PIN_D0, 8, false);
-
-    // Preload scratch Y with the port to match (0x90): put -> pull -> mov y, osr.
-    pio_sm_put(msx_bus.pio, msx_bus.sm_p90, STD_PRN_STATUS_PORT);
-    pio_sm_exec(msx_bus.pio, msx_bus.sm_p90, pio_encode_pull(false, true));
-    pio_sm_exec(msx_bus.pio, msx_bus.sm_p90, pio_encode_mov(pio_y, pio_osr));
-
-    // Start DISABLED. PDFRCPRN.COM's knock (p90_knock_write) turns it on, but
-    // only after it has positively identified an OCM — so the firmware never
-    // drives 0x90 unless a program confirmed the machine leaves it free. See
+#endif
+#ifdef PD_P90_READ
+    // 0x90 -> 0x00, "printer ready". PDFRCPRN.COM's knock turns it on, but only
+    // after it has positively identified an OCM - so the firmware never drives
+    // 0x90 unless a program confirmed the machine leaves it free. See
     // src/msx-tools/pdfrcprn.s.
-    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_p90, false);
+    msx_bus.sm_p90 = 2;
+    status_responder_init(msx_bus.sm_p90, STD_PRN_STATUS_PORT, 0, false);
+#endif
+#ifdef PD_MIDI_STATUS
+    // 0xE9 -> 0x05, "MSX-MIDI ready to send". PDMIDI.COM's knock turns it on,
+    // and PDMIDI only knocks after reading 0xFF at 0xE9 - nothing there. On an
+    // OCM the FPGA answers 0xE9 itself, so this stays off. See
+    // src/msx-tools/pdmidi.s.
+    msx_bus.sm_e9 = 3;
+    status_responder_init(msx_bus.sm_e9, MSXMIDI_PORT_STAT, 5, true);   // TxRDY | TxEMPTY
 #endif
 
     pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, true);
     pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, true);
+
+    // PSG 엿듣기는 모든 모드에서 살아 있어야 한다. 쓰기 캡터만 켠다 - 읽기 응답기는
+    // 건드리지 않는다(위 주석 참조). Sunrise/매퍼 모드는 뒤이어 msx_pio_io_bus_init
+    // 이 같은 SM 을 다시 잡으므로 충돌하지 않는다.
+    msx_pio_io_write_captor_init();
 }
 
 // -----------------------------------------------------------------------
@@ -327,6 +380,41 @@ static void msx_pio_io_bus_init(void)
     pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, true);
 }
 
+// -----------------------------------------------------------------------
+// PSG 엿듣기를 모든 모드에서 살리기
+// -----------------------------------------------------------------------
+// I/O 쓰기 캡터만 켠다. **읽기 응답기는 켜지 않는다** - 그것은 기계의 모든 I/O
+// 읽기(VDP·PSG 상태 폴링, 초당 수천 건)를 core0 으로 올려 IDE 서빙과 경합한다.
+// 쓰기 캡터는 잡기만 하고 버스를 몰지 않으므로 어느 모드에서 켜 두어도 안전하다.
+static void msx_pio_io_write_captor_init(void)
+{
+    msx_io_bus.pio_write   = pio1;
+    msx_io_bus.sm_io_write = 1;
+
+    if (!msx_io_bus_programs_loaded)
+    {
+        msx_io_bus.pio_read = pio1;
+        msx_io_bus.sm_io_read = 0;
+        msx_io_bus.offset_io_read  = pio_add_program(pio1, &msx_io_read_responder_program);
+        msx_io_bus.offset_io_write = pio_add_program(pio1, &msx_io_write_captor_program);
+        msx_io_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(pio1, msx_io_bus.sm_io_write, false);
+    pio_sm_clear_fifos(pio1, msx_io_bus.sm_io_write);
+    pio_sm_restart(pio1, msx_io_bus.sm_io_write);
+
+    pio_sm_config cfg = msx_io_write_captor_program_get_default_config(msx_io_bus.offset_io_write);
+    sm_config_set_in_pins(&cfg, PIN_A0);
+    sm_config_set_in_shift(&cfg, false, false, 32);
+    sm_config_set_fifo_join(&cfg, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg, PIN_WR);
+    sm_config_set_clkdiv(&cfg, 1.0f);
+    pio_sm_init(pio1, msx_io_bus.sm_io_write, msx_io_bus.offset_io_write, &cfg);
+    pio_sm_set_enabled(pio1, msx_io_bus.sm_io_write, true);
+}
+
+
 static inline uint8_t __not_in_flash_func(read_rom_byte)(const uint8_t *rom_base, uint32_t rel)
 {
     return (rel < rom_cached_size) ? rom_sram[rel] : rom_base[rel];
@@ -373,6 +461,40 @@ static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out,
     return true;
 }
 
+// Sunrise/매퍼 루프는 이 FIFO 를 자기가 비운다. 그 모드에서는 core1 이 손대면 안 된다.
+volatile bool pd_io_fifo_core0 = false;
+
+// core1 에서 부른다 (pd_midipac_task). core0 이 안 비우는 모드에서만 비운다.
+// ROM 서빙 루프들은 pio_sm_get_blocking 으로 막혀 있어 core0 에는 비울 자리가 없다.
+void __not_in_flash_func(pd_io_drain_psg)(void)
+{
+    if (pd_io_fifo_core0)
+        return;
+
+    // **반드시 한 번에 처리할 양을 묶어야 한다.**
+    //
+    // 이 FIFO 에는 PSG 뿐 아니라 기계의 모든 I/O 쓰기가 들어온다. 게임 중에는
+    // VDP 쓰기만 초당 수천 건이라, 비는 대로 계속 차오른다. 조건 없는 while 로
+    // 두면 이 루프가 좀처럼 안 끝나고 그동안 core1 의 tud_task() 가 못 돌아
+    // USB 가 떨어진다 - 소리가 중간중간 끊기는 것으로 나타났다 (2026-09-12).
+    //
+    // 한 번에 여기까지만 하고 돌아간다. 호출은 pd_usb_task 루프마다 일어나므로
+    // 실제 처리량은 넉넉하다. 넘친 것은 버려지지만, 레지스터 한 벌을 20 ms 마다
+    // 통째로 보내는 구조라 개별 쓰기가 빠져도 소리에는 거의 영향이 없다.
+    //
+    // **MSX-MIDI(0xE8)에는 그 변명이 통하지 않는다.** 저쪽은 스냅샷이 아니라
+    // 바이트 스트림이라, 하나가 빠지면 그 뒤가 통째로 어긋난다. 31250 bps 는
+    // 초당 3125 바이트라 64 건 한도에 걸릴 양은 아니지만, 걸리기 시작하면
+    // 소리가 "끊긴다" 가 아니라 "망가진다" 로 나타난다 - pd_msxmidi_drops() 가
+    // 아니라 이 FIFO 쪽에서 새는 것이므로 그 카운터에도 안 잡힌다.
+    uint16_t a; uint8_t d;
+    for (int i = 0; i < 64 && pio_try_get_io_write(&a, &d); i++)
+    {
+        pd_midipac_io_write(a, d);      // 0xA0/0xA1 (PSG -> MIDI)
+        pd_msxmidi_io_write(a, d);      // 0xE8 (MSX 가 직접 만든 MIDI)
+    }
+}
+
 // Map an 8-bit mapper register value to a valid mapper page index.
 static inline uint8_t __not_in_flash_func(mapper_page_from_reg)(uint8_t reg)
 {
@@ -400,21 +522,50 @@ static inline bool __not_in_flash_func(pio_try_get_io_read)(uint16_t *addr_out)
 // *every* I/O read in the system - VDP and PSG status polls, thousands a second
 // - to core0, each needing a token, which would compete with IDE servicing for
 // no benefit (0xF6 status is not emulated anyway - the MSX side never reads it).
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+// The status responders start disabled (see msx_pio_bus_init). An MSX-side tool
+// arms one with a 4-byte "knock" to an unused I/O port that the I/O write
+// captor sees here, after it has checked that nothing else answers that port:
+//
+//   F0 90 0F A5   PDFRCPRN.COM  0x90 printer status  (only on an OCM)
+//   F0 E9 0F A5   PDMIDI.COM    0xE9 MSX-MIDI status (only when 0xE9 reads 0xFF)
+//
+// This gate means the firmware never drives a port some other chip already
+// drives. Only writes to the knock port advance/reset a sequence; other ports
+// are ignored (so interrupt-driven I/O between the knock bytes can't break it).
+// The two sequences are tracked separately and share their first byte.
+#define STATUS_KNOCK_PORT 0x2Eu
+
+// One step of a 4-byte knock. True when `data` completes the sequence.
+static inline bool __not_in_flash_func(knock_step)(const uint8_t *seq, uint8_t *pos, uint8_t data)
+{
+    if (data == seq[*pos])
+    {
+        if (++*pos == 4u)
+        {
+            *pos = 0;
+            return true;
+        }
+        return false;
+    }
+    *pos = (data == seq[0]) ? 1u : 0u;
+    return false;
+}
+
 #ifdef PD_P90_READ
-// The 0x90 read responder starts disabled (see msx_pio_bus_init). PDFRCPRN.COM,
-// after it has positively identified an OCM, enables it with a 4-byte "knock"
-// (F0 90 0F A5) to an unused I/O port that the I/O write captor sees here. This
-// gate means the firmware never drives 0x90 on a real MSX, where it would clash.
-// Only writes to the knock port advance/reset the sequence; other ports are
-// ignored (so interrupt-driven I/O between the knock bytes can't break it).
-#define P90_KNOCK_PORT 0x2Eu
 static const uint8_t p90_knock_seq[4] = {0xF0u, 0x90u, 0x0Fu, 0xA5u};
 static uint8_t p90_knock_pos = 0;
 static bool    p90_enabled   = false;
+#endif
+#ifdef PD_MIDI_STATUS
+static const uint8_t e9_knock_seq[4] = {0xF0u, 0xE9u, 0x0Fu, 0xA5u};
+static uint8_t e9_knock_pos = 0;
+static bool    e9_enabled   = false;
+#endif
 
-static inline void __not_in_flash_func(p90_knock_write)(uint16_t port, uint8_t data)
+static inline void __not_in_flash_func(status_knock_write)(uint16_t port, uint8_t data)
 {
-    if ((uint8_t)(port & 0xFFu) != P90_KNOCK_PORT)
+    if ((uint8_t)(port & 0xFFu) != STATUS_KNOCK_PORT)
         return;
 #ifdef PD_DIAG_KNOCK
     // Every byte that reaches the knock port, echoed onto the print capture.
@@ -423,39 +574,37 @@ static inline void __not_in_flash_func(p90_knock_write)(uint16_t port, uint8_t d
     pd_stdprint_debug_push(0xE0u);
     pd_stdprint_debug_push(data);
 #endif
-    if (data == p90_knock_seq[p90_knock_pos])
+#ifdef PD_P90_READ
+    if (knock_step(p90_knock_seq, &p90_knock_pos, data) && !p90_enabled)
     {
-        if (++p90_knock_pos == sizeof(p90_knock_seq))
-        {
-            p90_knock_pos = 0;
-            if (!p90_enabled)
-            {
 #ifdef PD_DIAG_KNOCK
-                pd_stdprint_debug_push(0xEEu);   // full sequence recognised
+        pd_stdprint_debug_push(0xEEu);   // full sequence recognised
 #endif
-                // Always the PIO0 responder, mapper mode included.
-                //
-                // It used to defer to the mapper loop's inline answer, on the
-                // reasoning that two drivers on one read cycle would race. That
-                // race cannot happen: D0-D7 are pio_gpio_init'd to PIO0 (see
-                // msx_pio_bus_init), and in the mapper loop that runs *after*
-                // msx_pio_io_bus_init - so the pins are muxed to PIO0 and PIO1
-                // cannot drive them at all. The inline answer ran its `out pins`
-                // into pins it did not own: the C code executed, the diagnostic
-                // reported an answer, and the Z80 still read 0xFF off a floating
-                // bus. That is the bug this replaces.
-                //
-                // The PIO0 responder owns the pins and needs no CPU round-trip,
-                // which is also what makes it fast enough for one read cycle.
-                pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_p90, true);
-                p90_enabled = true;
-            }
-        }
+        // Always the PIO0 responder, mapper mode included.
+        //
+        // It used to defer to the mapper loop's inline answer, on the
+        // reasoning that two drivers on one read cycle would race. That race
+        // cannot happen: D0-D7 are pio_gpio_init'd to PIO0 (see
+        // msx_pio_bus_init), and in the mapper loop that runs *after*
+        // msx_pio_io_bus_init - so the pins are muxed to PIO0 and PIO1 cannot
+        // drive them at all. The inline answer ran its `out pins` into pins it
+        // did not own: the C code executed, the diagnostic reported an answer,
+        // and the Z80 still read 0xFF off a floating bus. That is the bug this
+        // replaces.
+        //
+        // The PIO0 responder owns the pins and needs no CPU round-trip, which
+        // is also what makes it fast enough for one read cycle.
+        pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_p90, true);
+        p90_enabled = true;
     }
-    else
+#endif
+#ifdef PD_MIDI_STATUS
+    if (knock_step(e9_knock_seq, &e9_knock_pos, data) && !e9_enabled)
     {
-        p90_knock_pos = (data == p90_knock_seq[0]) ? 1u : 0u;
+        pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_e9, true);
+        e9_enabled = true;
     }
+#endif
 }
 #endif
 
@@ -463,13 +612,28 @@ static inline void __not_in_flash_func(drain_io_printer)(void)
 {
     uint16_t io_addr;
     uint8_t  io_data;
-    while (pio_try_get_io_write(&io_addr, &io_data))
+    // **상한이 있어야 한다.** 이 함수는 버스 주소를 받은 뒤 데이터를 돌려주기
+    // 직전에 불린다. 조건 없는 while 이면 그동안 들어온 것을 전부 처리하고
+    // 나서야 답하게 되고, Z80 의 읽기 창(3.58MHz 에서 1 마이크로초 남짓)은
+    // 그걸 기다려 주지 않는다.
+    //
+    // core1 쪽 같은 루프(pd_io_drain_psg)가 이미 이 교훈을 남겼다: 조건 없이
+    // 두었다가 소리가 중간중간 끊겼다 (2026-09-12). 이쪽은 훨씬 더 아픈 자리다.
+    //
+    // FIFO 는 8 칸(joined)이라 여덟이면 보통 한 번에 다 비운다. 그보다 더
+    // 도는 것은 나보다 빠른 생산자를 쫓는 것이고, 그 시간은 버스 답하기에서
+    // 빼 오는 것이다.
+    for (int i = 0; i < 8 && pio_try_get_io_write(&io_addr, &io_data); i++)
     {
+        // PSG 캡처는 빌드 옵션에 걸지 않는다. PD_STDPRINT_WRITE 는 기본이 꺼짐이라
+        // 그 안에 두면 통째로 컴파일에서 빠진다.
+        pd_midipac_io_write(io_addr, io_data);         // 0xA0/0xA1 (PSG -> MIDI)
+        pd_msxmidi_io_write(io_addr, io_data);         // 0xE8 (MSX 가 만든 MIDI)
 #ifdef PD_STDPRINT_WRITE
         pd_stdprint_io_write(io_addr, io_data);     // 0x90/0x91 (standard port)
 #endif
-#ifdef PD_P90_READ
-        p90_knock_write(io_addr, io_data);             // PDFRCPRN enable knock
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+        status_knock_write(io_addr, io_data);          // PDFRCPRN / PDMIDI knocks
 #endif
     }
 }
@@ -1494,6 +1658,14 @@ static inline void __not_in_flash_func(handle_sunrise_write)(uint16_t addr, uint
         return;
     }
 
+    // [VOICE] 그 바로 뒤 0x7F0C-0x7F0E. 메일박스와 **일부러 다른 주소**다 -
+    // 여기는 읽으면 소비되고, 메일박스는 그러면 안 되기 때문이다.
+    if (pd_voice_is_addr(addr))
+    {
+        pd_voice_write(&sunrise_voice_ring, addr, data);
+        return;
+    }
+
     // IDE register / control writes (0x4104, 0x7C00-0x7DFF, 0x7E00-0x7EFF)
     if (addr >= 0x4000u && addr <= 0x7FFFu)
     {
@@ -1514,6 +1686,7 @@ static inline void __not_in_flash_func(handle_sunrise_write)(uint16_t addr, uint
 // ATA commands are translated to USB MSC operations on Core 1.
 void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable)
 {
+    pd_io_fifo_core0 = true;   // 이 루프가 I/O FIFO 를 직접 비운다
     const uint8_t *rom_base;
     uint32_t available_length;
     prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
@@ -1560,20 +1733,57 @@ void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_
         uint16_t addr;
 
         // Poll: drain write FIFO while waiting for a read event
+        //
+        // **The read comes first.** Draining before looking means an address
+        // that arrived a moment ago waits for however long the drain takes,
+        // and the Z80's read window does not wait with it.
+        //
+        // And while a word is playing, do not drain the I/O FIFO at all. The
+        // Z80 writes the PSG six times a sample - sixty thousand a second -
+        // so that FIFO is always full, always of our own noise, and emptying
+        // it steals exactly the microseconds the next sample's read needs.
+        // Nothing useful is lost: the capture feeds MIDI-PAC and the printer,
+        // and neither is running while the machine is speaking.
+        //
+        // What this looks like when it is wrong: the tone the cartridge streams
+        // comes out as noise, **and differently on each run**, while the same
+        // tone generated by the Z80 itself is clean. Late data is not wrong
+        // data by a fixed amount - it is whatever the bus happened to hold.
         while (true)
         {
-            pio_drain_writes(handle_sunrise_write, &ctx);
-            drain_io_printer();                 // 0xF5/0xF6 capture (printer)
             if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
             {
                 addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
                 break;
             }
+            pio_drain_writes(handle_sunrise_write, &ctx);
+            if (!sunrise_voice_ring.armed)
+                drain_io_printer();             // 0xF5/0xF6 capture (printer)
+        }
+
+        // [VOICE] **먼저, 그리고 곧바로 답한다.**
+        //
+        // 아래 드레인은 IDE 를 위해 있다 - 주소와 함께 도착한 레지스터 쓰기가
+        // 먼저 반영되어야 그 다음 읽기가 맞다. 음성 창에는 그런 쓰기가 없고,
+        // 대신 아주 비싼 손님이 붙어 있다: 재생 중 Z80 은 샘플마다 PSG 에
+        // 여섯 번 OUT 하므로 I/O FIFO 가 늘 차 있고, 그것을 비우고 나서
+        // 답하면 Z80 의 읽기 창이 이미 지나간 뒤다.
+        //
+        // 링은 그대로 돌기 때문에 호스트에서는 아무 차이가 안 보인다 -
+        // played 는 정확한 속도로 오르고, 어디에도 오류가 안 남는다. 다만
+        // Z80 이 집어 든 값이 카트리지가 내준 값이 아니다.
+        if (pd_voice_is_addr(addr))
+        {
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read,
+                                pio_build_token(true,
+                                    pd_voice_read(&sunrise_voice_ring, addr)));
+            continue;               // 드레인은 다음 바퀴에서 한다
         }
 
         // Drain any writes that arrived alongside the read
         pio_drain_writes(handle_sunrise_write, &ctx);
-        drain_io_printer();
+        if (!sunrise_voice_ring.armed)
+            drain_io_printer();
 
         // Sunrise IDE ROM is only at 0x4000-0x7FFF (one 16KB window)
         bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
@@ -1590,6 +1800,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_
             {
                 data = pd_dos_read(addr);
             }
+            // [VOICE] 여기 없다 - 위에서 이미 답하고 continue 했다. 드레인
+            // 뒤에 두면 늦고, 늦은 답은 틀린 바이트다.
             // Check if IDE intercepts this read (0x7C00-0x7EFF when enabled)
             else if (sunrise_ide_handle_read(&ide, addr, &ide_data))
             {
@@ -1633,6 +1845,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_
 // as 8-bit values and normalized to 0..11 when accessing RAM.
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable)
 {
+    pd_io_fifo_core0 = true;   // 이 루프가 I/O FIFO 를 직접 비운다
     (void)cache_enable;
 
     // ---------------------------------------------------------------
@@ -1718,6 +1931,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                             // found at all.
                             if (pd_dos_is_addr(waddr))
                                 pd_dos_write(waddr, wdata);
+                            else if (pd_voice_is_addr(waddr))
+                                pd_voice_write(&sunrise_voice_ring, waddr, wdata);   // [VOICE]
                             else
                                 sunrise_ide_handle_write(&ide, waddr, wdata);
                         }
@@ -1752,11 +1967,13 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 {
                     mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
                 }
+                pd_midipac_io_write(io_addr, io_data);       // 0xA0/0xA1 (PSG -> MIDI)
+                pd_msxmidi_io_write(io_addr, io_data);      // 0xE8 (MSX 가 만든 MIDI)
 #ifdef PD_STDPRINT_WRITE
                 pd_stdprint_io_write(io_addr, io_data);   // 0x90/0x91
 #endif
-#ifdef PD_P90_READ
-                p90_knock_write(io_addr, io_data);        // PDFRCPRN enable knock
+#if defined(PD_P90_READ) || defined(PD_MIDI_STATUS)
+                status_knock_write(io_addr, io_data);     // PDFRCPRN / PDMIDI knocks
 #endif
             }
         }
@@ -1782,7 +1999,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 // are muxed to PIO0 (msx_pio_bus_init runs after
                 // msx_pio_io_bus_init), so an `out pins` from PIO1 drives
                 // nothing. The self-contained PIO0 responder does it instead -
-                // see p90_knock_write.
+                // see status_knock_write.
 
                 pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
             }
@@ -1823,6 +2040,10 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                         if (pd_dos_is_addr(addr))
                         {
                             data = pd_dos_read(addr);
+                        }
+                        else if (pd_voice_is_addr(addr))     // [VOICE] 읽으면 소비된다
+                        {
+                            data = pd_voice_read(&sunrise_voice_ring, addr);
                         }
                         else if (sunrise_ide_handle_read(&ide, addr, &ide_data))
                         {
@@ -2155,6 +2376,10 @@ int main(void)
     // [PDSER] Core1 runs the USB CDC device (link to the host) for the whole
     // lifetime of the firmware. It must start before the slot-bus loops below,
     // because those never return.
+    pd_midipac_init();                   // PSG 그림자 초기화 (core1 이 뜨기 전에)
+    // 호스트 프레임 파서를 미리 세운다. Sunrise 모드에서만 세우면, 일반 ROM
+    // 게임이 도는 동안 화면의 스위치가 카트리지에 안 닿는다.
+    sunrise_usb_init_hostlink();
     multicore_launch_core1(pd_usb_task);
 
     // Load the ROM data from flash memory

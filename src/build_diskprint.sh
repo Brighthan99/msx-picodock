@@ -11,22 +11,19 @@
 # make_uf2.sh cannot default to them - it also has to serve the other builds.
 #
 #   FW=pdser        the integrated firmware: virtual disk + printer captor
-#   NEXTOR=both puts two disk entries in the menu, because whether a machine has
-#   a memory mapper decides which one boots:
-#
-#     "PicoDock Disk (Nextor)"                 mapper 10 - the normal one
-#     "PicoDock Disk - no mapper in this MSX"  mapper 11 - carries 192KB of its own
+#   NEXTOR=on       one menu entry, "PicoDock Disk (Nextor)", and it is the one
+#                   that carries its own 192KB memory mapper (mapper 11). It
+#                   boots on a machine with a mapper and on one without alike.
 #
 #   Nextor only loads NEXTOR.SYS in DOS2 mode, and DOS2 mode needs mapped RAM.
-#   A 64K MSX2 such as the Sony HB-F1XD has none, so the kernel falls back to
-#   looking for MSX-DOS 1 files that are not on the disk and drops to BASIC -
-#   which looks like the cartridge failed and is not. The second entry brings
-#   its own mapper and boots there. It costs 128KB of flash and, while running,
-#   the printer: the mapper's page registers are at I/O FC-FF and PIO1 is taken.
+#   A 64K MSX2 such as the Sony HB-F1XD has none, so a disk entry without its
+#   own mapper drops to BASIC there - which looks like the cartridge failed and
+#   is not. There used to be two entries (NEXTOR=both), one with and one
+#   without; the one without had no machine it was needed on, so it went. The
+#   multirom tool's -s is kept as an alias for -m. See make_uf2.sh.
 #
-#   NEXTOR=sunrise  puts only "PicoDock Disk (Nextor)" in the menu. Without it the
-#                   menu lists ROMs only and there is nothing to boot the disk
-#                   with, which is the mistake this script exists to stop.
+#   Without NEXTOR the menu lists ROMs only and there is nothing to boot the
+#   disk with, which is the mistake this script exists to stop.
 #
 # There used to be a third, KEYBOARD=off, selecting the stock Nextor kernel over
 # one carrying the remote keyboard as its DRV_TIMI. That whole path is in
@@ -69,4 +66,4 @@ FW=pdser NEXTOR=on "$ROOT/src/make_uf2.sh" "$ROMDIR" "$OUT"
 echo
 echo "[+] disk + printer image ready"
 echo "    flash : hold BOOTSEL, plug in, drop $OUT on RPI-RP2"
-echo "    serve : ./src/host/pd_diskserver.py <image.img> --tui"
+echo "    serve : ./dist/disk/serve.sh <image.img>"

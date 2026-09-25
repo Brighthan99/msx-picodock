@@ -14,7 +14,7 @@
 #      `fusion-ROM.lib`, the ROM build. menu.c implements its own putchar() via
 #      BIOS CALSLT, so printf routes through that.
 #   3. hex2bin is not available on macOS (no brew formula) — replaced by
-#      ../tools/ihx2rom.py
+#      ../tools/ihx2rom.mjs (Node, which the host side needs anyway)
 ######################################################################
 
 FUSION  ?= $(HOME)/work/fusion-c/WorkingFolder/fusion-c
@@ -81,11 +81,11 @@ $(BINDIR)/menu.ihx: $(SRCDIR)/menu.c $(SRCDIR)/menu.h $(SRCDIR)/bios.h \
 	@$(CC) $(CCFLAGS) $(CCDEFS) $(PLATFORM) --use-stdout --no-std-crt0 \
 		$(CRT0) $(LOCALOBJ) $(FUSIONLIB) -I $(FUSIONHEADER) $(SRCDIR)/menu.c -o $@ \
 		> $(BINDIR)/link.log 2>&1; \
-	python3 ../tools/check_sdcc_link.py $(BINDIR)/link.log $@
+	node ../tools/check_sdcc_link.mjs $(BINDIR)/link.log $@
 
 $(BINDIR)/$(OUTFILE): $(BINDIR)/menu.ihx
 	@echo "Building $(OUTFILE)"
-	@python3 ../tools/ihx2rom.py $< $@ --start $(ROM_START) --size $(ROM_SIZE)
+	@node ../tools/ihx2rom.mjs $< $@ --start $(ROM_START) --size $(ROM_SIZE)
 
 package: $(BINDIR)/$(OUTFILE)
 	@mkdir -p $(DISDIR)

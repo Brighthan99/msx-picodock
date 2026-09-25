@@ -17,7 +17,7 @@
 # signal, and the copy erroring out is normal. Finder reports failure on a
 # perfectly good write for exactly that reason.
 #
-# The work is ../disk/tools/flash_uf2.py, which finds the drive wherever this
+# The work is ../node/bin/flash_uf2.js, which finds the drive wherever this
 # mounts it. flash.bat is the same thing for cmd.exe.
 # ---------------------------------------------------------------------------
 set -e
@@ -63,15 +63,11 @@ if [ -z "$UF2" ]; then
   fi
 fi
 
-# The host programs are staged once, under ../disk/tools/. They are not
-# disk-specific - that folder is where src/host/ lands - and one staged copy is
-# better than two that drift.
-TOOLS=../disk/tools
-[ -e "$TOOLS/flash_uf2.py" ] || {
-  echo "[-] $TOOLS/flash_uf2.py is missing."
-  echo "    tools/ is staged from src/host/ by ./src/stage_dist.sh - run that."
-  exit 1; }
+# The host programs are staged once, under ../node/ - one copy for the disk,
+# the printer and this, rather than two that drift.
+DIST="$HERE/.."
+. "$DIST/need-node.sh"
 
-python3 "$TOOLS/flash_uf2.py" "$UF2" || exit 1
+node "$NODEDIR/bin/flash_uf2.js" "$UF2" || exit 1
 
 echo "    Confirm the firmware came up:  ./dist/cartridge/flash-check.sh"

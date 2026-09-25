@@ -41,11 +41,16 @@
 #define CFG_TUD_CDC                 1
 #define CFG_TUD_MSC                 0
 #define CFG_TUD_HID                 0
-#define CFG_TUD_MIDI                0
+#define CFG_TUD_MIDI                1
 #define CFG_TUD_VENDOR              0
 
 #define CFG_TUD_CDC_RX_BUFSIZE      256
 #define CFG_TUD_CDC_TX_BUFSIZE      256
+
+// MIDI-PAC 이 내보내는 이벤트는 초당 수백 바이트 수준이라 작아도 된다.
+// 64 는 full-speed 벌크 한 패킷이다.
+#define CFG_TUD_MIDI_RX_BUFSIZE     64
+#define CFG_TUD_MIDI_TX_BUFSIZE     128
 
 #ifdef __cplusplus
  }

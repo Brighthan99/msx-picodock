@@ -186,6 +186,10 @@ void sunrise_ide_init(sunrise_ide_t *ide)
     ide->buffer_length = 0;
     ide->sectors_remaining = 0;
     ide_set_device_signature(ide);
+    // 음성 링도 여기서 씻는다. 전역이라 0 으로 시작하는데, **0 은 무음이
+    // 아니라 진폭의 바닥**이라 아무것도 안 틀어도 딸깍 소리가 된다.
+    // pd_voice_reset 이 가운데(128)로 올려 놓는다.
+    pd_voice_reset(&sunrise_voice_ring);
 }
 
 // -----------------------------------------------------------------------
@@ -869,9 +873,28 @@ void __not_in_flash_func(sunrise_usb_task)(void)
 #include "pd_usb.h"
 #include "pd_stdprint.h"
 #include "pd_protocol_ids.h"
+#include "pd_voice_win.h"
+#include "pd_midipac.h"
 
 #define BLK_SECTOR_SIZE   512u
 #define BLK_TIMEOUT_US    3000000u      // same 3s budget the USB backend used
+
+// 용량 문의(INFO)만은 훨씬 짧게 기다렸다가 다시 묻는다.
+//
+// READ/WRITE 는 MSX 가 요청해 놓고 BSY 로 기다리는 중이라, 3 초는 "여기까지만
+// 붙잡고 있겠다" 는 상한이다. 반면 INFO 는 **아무도 기다리지 않는** 선행 질문이라
+// 실패해도 잃을 것이 없다. 그런데도 3 초를 기다리면, 그 3 초 안에 Nextor 가
+// IDENTIFY 를 하는 순간 용량을 모르는 채로 답해 `<failed>` 가 뜬다.
+//
+// 어긋나는 원인이 리눅스에 실재한다. pd_usb_connected() 는 DTR 이고,
+// ModemManager 는 새 ttyACM 이 보이면 모뎀인지 떠보려고 포트를 열어 DTR 을
+// 올린다. 카트리지는 그것을 서버로 착각해 INFO 를 던지지만 ModemManager 는
+// 답할 줄 모르고, 그 동안 포트를 쥐고 있어 진짜 서버는 열지도 못한다.
+// 3 초가 통째로 날아가는 창이 바로 거기다 (우분투에서 관측, 2026-09-19).
+//
+// 300 ms 면 MSX 부팅이 Nextor 에 닿기 전에 여러 번 다시 묻게 된다. 답이 오면
+// usb_device_mounted 가 서고 바깥 if 가 막으므로 되풀이는 저절로 멈춘다.
+#define BLK_INFO_RETRY_US  300000u
 
 // Longest frame we send: SOF+CMD+LEN16 + (lba4+count1+512) + CHK
 #define BLK_TX_MAX        (5u + 5u + BLK_SECTOR_SIZE)
@@ -939,9 +962,73 @@ static void blk_put_u32(uint32_t v)
     blk_frame_put((uint8_t)((v >> 24) & 0xFFu));
 }
 
+// --- 음성 (pd_voice_win.h) --------------------------------------------------
+//
+// 호스트가 합성한 PSG 볼륨 스트림이 여기 링에 담기고, MSX 가 0x7F0C 를 읽을
+// 때마다 한 바이트씩 나간다. 무거운 계산은 호스트에서 끝났고 카트리지가 할
+// 일은 나르는 것뿐이다.
+// **호출이 아니라 전역이다.** 버스 핸들러는 MSX 가 주소를 내놓을 때마다 여기
+// 닿는데, 거기서 함수를 하나 부르면 그 함수가 플래시에 있는 한 정지가 생기고
+// Z80 은 그 정지를 틀린 바이트로 읽는다. 주소를 그냥 아는 편이 싸다.
+pd_voice_t sunrise_voice_ring;
+
 static bool blk_tx_busy(void)
 {
     return blk_tx_sent < blk_tx_len;
+}
+
+// 남이 이 파이프에 끼어들어도 되는지 묻는 자리. 프레임이 반쯤 나가 있는 동안
+// PSG 스트림이 22 바이트를 밀어 넣으면 블록 프레임이 찢어진다.
+static bool __not_in_flash_func(blk_pipe_busy)(void)
+{
+    return blk_tx_busy();
+}
+
+// 음성 상태를 호스트에게. **흐름 제어가 이것 하나에 달려 있다** - 호스트는
+// 여기서 들은 자리만큼만 보낸다. 안 보내면 호스트는 링이 비었는지 알 수 없고,
+// 모르는 채로 밀면 말이 넘쳐 사라진다.
+//
+// PSG 프레임과 같은 규칙: 자리가 모자라면 **아예 안 보낸다.** 잘린 프레임은
+// 받는 쪽에서 다음 SOF 까지 버려지므로, 한 번 거르는 것보다 큰 구멍이 된다.
+void sunrise_voice_tick(void)
+{
+    pd_voice_t *v = &sunrise_voice_ring;
+
+    // MSX 가 멈췄다는 말은 **반드시 나가야 한다.** 호스트가 "말 다 했다" 를
+    // 아는 길이 이것뿐이고, 못 들으면 다음 문장을 영영 거절한다. 그렇다고
+    // 계속 보내면 아무도 말 안 하는 동안 파이프가 이것으로 찬다 - 그래서
+    // 몇 번만 보내고 조용해진다.
+    static uint8_t stop_sent;
+    if (!v->stopped)
+        stop_sent = 0;
+
+    // 아무 일도 없을 때는 말하지 않는다. 링이 비어 있고 시작도 안 눌렀고
+    // 닫히지도 않았고, 멈췄다는 말도 이미 했으면 보낼 것이 없다.
+    if (v->head == v->tail && !v->armed && !v->closed
+        && (!v->stopped || stop_sent >= 5u))
+        return;
+
+    // **주기를 둔다.** 이 함수는 core1 폴링 루프에서 불리므로 그냥 두면
+    // 초에 수만 번 나가고, 그 자체로 파이프가 차서 정작 보낼 샘플이 못 간다.
+    // 10 ms 는 110 샘플 - 512 바이트 프레임 하나가 46 ms 어치니 한 프레임
+    // 나가는 동안 자리 소식이 네다섯 번 간다. 넉넉하면서 싸다.
+    static uint64_t next_stat_us;
+    const uint64_t now = time_us_64();
+    if (now < next_stat_us)
+        return;
+    next_stat_us = now + 10000u;
+
+    // 자리가 모자라면 **아예 보내지 않는다** - PSG 프레임과 같은 규칙.
+    // 잘린 프레임은 받는 쪽에서 다음 SOF 까지 버려지므로 더 큰 구멍이 된다.
+    if (pd_usb_write_room() < PD_VOICE_STAT_FRAME)
+        return;
+
+    // 형식은 pd_voice_win.c 에 있다 - 호스트에도 같은 형식을 읽는 코드가
+    // 있고(node/src/voicestream.js), 한 형식을 두 군데 적으면 갈라진다.
+    uint8_t f[PD_VOICE_STAT_FRAME];
+    pd_usb_write(f, pd_voice_status_frame(v, f));
+    if (v->stopped && stop_sent < 5u)
+        stop_sent++;
 }
 
 // Drain the staged frame into the CDC FIFO as room appears.
@@ -995,6 +1082,41 @@ static void blk_handle_frame(void)
         else
             blk_ide->usb_write_failed = true;
         blk_wait = BLK_IDLE;
+        break;
+
+    case PD_CMD_CTRL:
+        // 카트리지 자신에게 내리는 지시. MSX 로 중계되지 않는다.
+        // [what:1][on:1] — 모르는 what 은 조용히 무시한다 (구형 펌웨어에
+        // 새 호스트가 붙었을 때 오류를 내지 않기 위해서다).
+        if (blk_rx_len >= 2u)
+        {
+            const bool on = (blk_rx_payload[1] != 0u);
+            switch (blk_rx_payload[0])
+            {
+            case PD_CTRL_PSG_STREAM: pd_midipac_set_stream(on); break;
+            case PD_CTRL_MIDIPAC:    pd_midipac_set_midi(on);   break;
+            // 여기만 둘째 바이트가 불린이 아니라 값이다.
+            case PD_CTRL_MIDI_PROG:  pd_midipac_set_program(blk_rx_payload[1]); break;
+            default: break;
+            }
+        }
+        break;
+
+    case PD_CMD_VOICE_DATA:
+        // 샘플을 링에 담는다. **자리가 없으면 그만큼만 받는다** - 호스트가
+        // 자리를 보고 보내므로 여기서 넘치면 그쪽이 틀린 것이고, 막고
+        // 있어 봐야 디스크까지 멈춘다.
+        pd_voice_feed(&sunrise_voice_ring, blk_rx_payload, blk_rx_len);
+        break;
+
+    case PD_CMD_VOICE_CTRL:
+        if (blk_rx_len >= 1u)
+        {
+            if (blk_rx_payload[0] == PD_VOICE_CLOSE)
+                pd_voice_close(&sunrise_voice_ring);
+            else
+                pd_voice_reset(&sunrise_voice_ring);
+        }
         break;
 
     case PD_CMD_MB_TO_MSX:
@@ -1141,11 +1263,19 @@ void __not_in_flash_func(sunrise_host_blk_poll)(void)
     blk_complete(); // drive the IDE state machine forward on completions
 
     blk_tx_pump();
+
+    // 자리 소식은 블록 프레임과 **따로** 나간다. 아래는 디스크가 바쁘면
+    // 돌아서는데, 그때도 말은 계속 재생되고 있고 호스트는 자리를 알아야
+    // 한다 - 여기서 막히면 읽는 동안 소리에 구멍이 난다.
+    sunrise_voice_tick();
+
     if (blk_tx_busy())
         return;                                  // finish sending first
 
     // Ask for the capacity once the host shows up, so IDENTIFY can answer.
-    if (!usb_device_mounted)
+    // 디스크를 서빙하지 않는 동안(일반 ROM 게임)에는 물어볼 이유가 없다 -
+    // 파서는 CTRL 을 받으려고 돌고 있을 뿐이다.
+    if (!usb_device_mounted && blk_ide)
     {
         if (blk_wait == BLK_IDLE && !blk_info_asked && pd_usb_connected())
         {
@@ -1162,7 +1292,9 @@ void __not_in_flash_func(sunrise_host_blk_poll)(void)
     if (blk_wait != BLK_IDLE)
     {
         // A stalled host must not leave the MSX in permanent BSY.
-        if (time_us_64() - blk_wait_since > BLK_TIMEOUT_US)
+        const uint64_t budget = (blk_wait == BLK_WAIT_INFO) ? BLK_INFO_RETRY_US
+                                                            : BLK_TIMEOUT_US;
+        if (time_us_64() - blk_wait_since > budget)
         {
             if (blk_ide)
             {
@@ -1253,6 +1385,23 @@ void __not_in_flash_func(sunrise_host_blk_poll)(void)
 #endif
 }
 
+/**
+ * 호스트 프레임 파서를 IDE 없이 설치한다.
+ *
+ * **CTRL 프레임은 어느 ROM 이 돌든 닿아야 한다.** PSG 원음·MIDI-PAC·악기는
+ * Nextor 와 무관하게 돌아가는데, 그것을 켜고 끄는 길만 Sunrise 모드에 묶여
+ * 있었다 - 일반 ROM 게임을 돌리면 파서 자체가 없어서 호스트가 보낸 CTRL 이
+ * 통째로 무시됐다. 화면에서 스위치를 눌러도 아무 일도 안 일어났고, 펌웨어
+ * 기본값이 그대로 도는 것을 "잘 된다" 로 읽기 쉬웠다 (2026-09-21 실기).
+ *
+ * 블록 명령은 blk_ide 가 NULL 이면 저절로 걸러진다 - 응답 처리마다 이미
+ * !blk_ide 를 보고 있고, 용량 문의도 아래에서 막는다.
+ */
+void sunrise_usb_init_hostlink(void)
+{
+    sunrise_usb_set_ide_ctx(NULL);
+}
+
 void sunrise_usb_set_ide_ctx(sunrise_ide_t *ide)
 {
     blk_ide = ide;
@@ -1265,6 +1414,7 @@ void sunrise_usb_set_ide_ctx(sunrise_ide_t *ide)
     // Take over the CDC receive path and get polled by the core1 pump.
     pd_usb_set_rx_sink(sunrise_host_blk_rx);
     pd_usb_set_poll_hook(sunrise_host_blk_poll);
+    pd_usb_set_pipe_busy_hook(blk_pipe_busy);
 }
 
 void sunrise_usb_task(void)

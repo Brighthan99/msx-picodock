@@ -3,7 +3,7 @@
 # four folders held nothing but a README telling you to fill them.
 #
 # Optional assets still have a place, it just is not made for you. The printer
-# looks in resources/fonts/ for a TTF and resources/msx-roms/ for a kanji ROM,
+# looks in resources/fonts/ for a TTF and resources/font-roms/ for a kanji ROM,
 # and skips that output if neither is there. Create the folder if you want it.
 resources/
 
@@ -52,11 +52,8 @@ src/picodock-menu/build/
 src/picodock-menu/dist/
 src/msx-tools/version.inc
 
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
+# Node.js packages, installed on first run, never committed
+node_modules/
 
 # Editors / OS
 .DS_Store
@@ -120,4 +117,5 @@ dist/cartridge/roms/*
 /dist/cartridge/README.md
 /dist/cartridge/roms/README.md
 /dist/disk/tools/README.md
+/dist/node/README.md
 /dist/disk/user-files/README.md

@@ -26,11 +26,10 @@ if not exist "%UF2%" if exist "%HERE%\%~1" set "UF2=%HERE%\%~1"
 :noarg
 cd /d "%HERE%"
 
-rem "python" on Windows may be the Store placeholder rather than Python.
-rem find-python.bat works out what actually runs, and says what to do when
-rem nothing does.
-call "%HERE%\..\find-python.bat"
-if not defined PY exit /b 1
+rem find-node.bat checks for Node.js and says what to install when it is
+rem missing.
+call "%HERE%\..\find-node.bat"
+if not defined NODE exit /b 1
 
 rem Whichever it picks, say which and what the other one is - "picodock" is in
 rem both names, so naming the file alone would not say what is about to be
@@ -54,12 +53,7 @@ echo [-] no image here to flash.
 echo     picodock.org.uf2 ships with this; make-uf2.bat builds picodock.uf2
 exit /b 1
 :have
-if not exist "..\disk\tools\flash_uf2.py" (
-  echo [-] ..\disk\tools\flash_uf2.py is missing.
-  echo     tools\ is staged from src/host/ by src\stage_dist.sh - run that.
-  exit /b 1
-)
 
-%PY% "..\disk\tools\flash_uf2.py" "%UF2%" || exit /b 1
+%NODE% "%NODEDIR%\bin\flash_uf2.js" "%UF2%" || exit /b 1
 echo     Confirm the firmware came up:  flash-check.bat
 endlocal

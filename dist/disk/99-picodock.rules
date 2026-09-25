@@ -1,0 +1,31 @@
+# 99-picodock.rules — PicoDock on Linux
+#
+#   sudo cp 99-picodock.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Then unplug the cartridge and plug it back in.
+#
+# This fixes the two things that stop the server on a fresh Linux box, without
+# turning any system service off.
+#
+# 1. **Permission.** /dev/ttyACM* belongs to root:dialout, so the server cannot
+#    open it until you are in that group - and a group added with usermod does
+#    not reach a desktop session until you log out and back in, which is not
+#    obvious when a new terminal still shows the old groups. MODE="0666" makes
+#    the question go away.
+#
+# 2. **ModemManager.** It probes every new serial device to see whether it is a
+#    modem, and while it does the port is busy. On a cartridge that is only
+#    slow, but Nextor's boot-time ATA IDENTIFY gives up after 3 seconds, so a
+#    few lost seconds turn into `<failed>` on the MSX screen.
+#
+#    ID_MM_DEVICE_IGNORE tells ModemManager to skip this device and nothing
+#    else. Stopping the whole service would work too, and is a bigger hammer
+#    than the problem deserves.
+
+# Running firmware: CDC serial + USB-MIDI
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", \
+  MODE="0666", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+
+# BOOTSEL: the RPI-RP2 mass-storage drive, so flashing needs no sudo
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"

@@ -1,0 +1,22 @@
+{
+  "name": "picodock-server",
+  "version": "0.90.0",
+  "description": "PicoDock host programs — the disk server, disk tools, printer tools, flashing, CALL PDASK and a local web UI over the 0x5A frame protocol.",
+  "license": "GPL-2.0-only",
+  "type": "module",
+  "bin": {
+    "pdserve": "./bin/pdserve.js"
+  },
+  "scripts": {
+    "test": "node --test test/serve.test.js test/link.test.js test/ask.test.js test/claude.test.js test/gemini.test.js test/printer.test.js test/printers.test.js test/hold.test.js test/ws.test.js test/web.test.js test/page.test.js test/voices.test.js test/voicestream.test.js test/voicestatus_crosscheck.test.js test/voicesay.test.js test/voice_windows.test.js test/voicesession.test.js test/voicewire.test.js test/psg.test.js test/midistat.test.js && node test/crosschecks.js"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@google/genai": "^2.24.0",
+    "serialport": "^12.0.0",
+    "usb": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

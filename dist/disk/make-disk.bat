@@ -7,13 +7,13 @@ rem   make-disk.bat 512m                   rem a different size
 rem   make-disk.bat 128m C:\msx\games.img
 rem
 rem The Windows half of make-disk.sh, and the same program underneath -
-rem tools\build_disk.py. A .bat exists only because cmd.exe cannot run a .sh;
+rem ..\node\bin\build_disk.js. A .bat exists only because cmd.exe cannot run a .sh;
 rem under Git Bash or WSL use make-disk.sh.
 rem
 rem Refuses to overwrite an image that exists - use sync-disk.bat for that. See
 rem make-disk.sh for what "filled" means and why system\ wins a name collision.
 rem
-rem Needs Python 3 and nothing else. Nothing is mounted: the FAT16 is written
+rem Needs Node.js and nothing else. Nothing is mounted: the FAT16 is written
 rem directly, which is what makes this work on Windows at all.
 rem ---------------------------------------------------------------------------
 setlocal
@@ -34,18 +34,12 @@ if "%VOL%"=="" set "VOL=MSXDISK"
 
 cd /d "%HERE%"
 
-rem "python" on Windows may be the Store placeholder rather than Python.
-rem find-python.bat works out what actually runs, and says what to do when
-rem nothing does.
-call "%HERE%\..\find-python.bat"
-if not defined PY exit /b 1
-if not exist "tools\build_disk.py" (
-  echo [-] tools\build_disk.py is missing.
-  echo     tools\ is staged from src/host/ by src\stage_dist.sh - run that.
-  exit /b 1
-)
+rem find-node.bat checks for Node.js and says what to install when it is
+rem missing.
+call "%HERE%\..\find-node.bat"
+if not defined NODE exit /b 1
 
-%PY% "tools\build_disk.py" make . "%SIZE%" "%OUT%" "%VOL%" || exit /b 1
+%NODE% "%NODEDIR%\bin\build_disk.js" make . "%SIZE%" "%OUT%" "%VOL%" || exit /b 1
 
 echo.
 echo     serve it:  serve.bat

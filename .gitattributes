@@ -1,0 +1,14 @@
+# Windows batch files are CR LF, and git must not touch that.
+#
+# cmd.exe runs an LF-only .bat line by line well enough, but it finds `goto`
+# and `call :label` targets by reading the file in 512-byte blocks with CR LF
+# assumed; with bare LF a label near a block boundary is missed ("The system
+# cannot find the batch label specified") or execution resumes in the wrong
+# place - depending on the bytes, so a one-line edit can break a file that
+# worked. `-text` stores the CR LF bytes as they are, so a clone on any OS, a
+# ZIP download and a folder copied off a Mac all get the same thing.
+# tests/test_line_endings.sh checks it.
+*.bat -text
+
+# Shell scripts are LF everywhere - a CR in one is a syntax error.
+*.sh text eol=lf

@@ -100,43 +100,76 @@ wait_iorq:
 .wrap
 
 ; ===================================================================
-; msx_p90_read_responder   (EXPERIMENTAL — standard printer port)
+; msx_status_read_responder   (standard printer port 0x90, MSX-MIDI 0xE9)
 ; ===================================================================
-; Answers  IN A,(0x90)  — the STANDARD MSX printer status port — with a
-; constant "ready" byte (0x00, so the BUSY bit is clear). On OCM port 0x90
-; otherwise floats to 0xFF, which BUSY-polling printer software reads as
-; "busy forever" and hangs on. Driving a ready status lets standard-port
-; software (e.g. the file-hunter word processors) proceed; their 0x90/0x91
-; data+strobe writes are already captured by msx_io_write_captor.
+; Answers  IN A,(port)  with a constant byte, for one I/O port per state
+; machine. Two instances run from this one program on PIO0:
+;
+;   SM2  port 0x90  -> 0x00  the standard printer status, "ready" (BUSY bit
+;                            clear). On OCM 0x90 otherwise floats to 0xFF, which
+;                            BUSY-polling printer software reads as "busy
+;                            forever". Armed by PDFRCPRN.COM, on an OCM only.
+;   SM3  port 0xE9  -> 0x05  the MSX-MIDI 8251 status, TxRDY | TxEMPTY. A
+;                            machine with no MSX-MIDI (Sony HB-F1XD) leaves
+;                            0xE9 floating at 0xFF, and MIDRY /I5 then reports
+;                            "I/F not found". Armed by PDMIDI.COM, only after it
+;                            has read 0xFF there. On an OCM the FPGA answers
+;                            0xE9 itself, so PDMIDI never arms this one there.
+;
+; The byte is `mov pins, null` (0x00) followed by `set pins, 5`. What the SET
+; reaches is each SM's own SET pin mapping: none on SM2 (count 0, so 0x90 stays
+; 0x00), D0..D4 on SM3 (so 0xE9 becomes 00101 = 0x05). One program, two
+; answers — PIO0 has 32 instruction slots and the memory responder (13), the
+; write captor (6) and this (13) fill them exactly.
+;
+; /BUSDIR (slot pin 4, GPIO 29 through the BSS138 Q3) — SM3 only. A real MSX
+; buffers the slot data bus, and for an I/O read it only turns that buffer
+; toward the CPU when the cartridge pulls /BUSDIR low — an I/O port, unlike
+; memory, is not tied to a slot the machine can see is selected. Without it
+; our byte never reaches the Z80, which reads 0xFF, and the buffer drives the
+; slot side against us for the length of the read. PicoVerse 2350 found the
+; same with its OPL4 (docs/log.md v2.60). So SM3 side-sets GPIO 29's
+; direction: output (latched low) while it drives D0..D7, input otherwise —
+; open drain, like /WAIT, so another cartridge can use the line too.
+;
+; SM2 runs with side-set disabled. 0x90 is only armed on an OCM, which
+; answered it without /BUSDIR, and whether the FPGA drives its own end of that
+; pin is not known — so it is not touched there. With side-set off the two
+; side bits read as delay instead: 24 cycles after driving (the Z80 holds /RD
+; for ~700 ns, this is ~100 ns at 230 MHz) and 16 after releasing. Harmless.
 ;
 ; SELF-CONTAINED and SAFE-BY-DESIGN:
 ;   * Address is filtered HERE, in the PIO — it drives D0..D7 ONLY when the
-;     I/O port equals 0x90. Every other I/O read leaves the bus tri-stated,
-;     so there is no contention with the FPGA on VDP/PSG/PPI/etc.
+;     I/O port equals Y. Every other I/O read leaves the bus tri-stated, so
+;     there is no contention with anything else on VDP/PSG/PPI/etc.
 ;   * No /WAIT (owned by the memory responder) and no CPU round-trip — the
 ;     response is a constant, produced entirely by the state machine.
-;   * Runs on PIO0 SM2 next to the memory responder (SM0), sharing the D0..D7
-;     GPIO mux. It only ever touches D0..D7 while /IORQ is low (an I/O cycle),
-;     which is exactly when the memory responder (gated on /SLTSL) is idle —
-;     so the two never drive the bus at the same time.
+;   * Shares the D0..D7 GPIO mux with the memory responder (SM0). It only ever
+;     touches D0..D7 while /IORQ is low (an I/O cycle), which is exactly when
+;     the memory responder (gated on /SLTSL) is idle — so they never drive the
+;     bus at the same time.
 ;
 ; Config from C:  in_pins base = A0 (reads A0..A7),  out_pins base = D0 (8),
-;                 jmp_pin = /RD,  and Y preloaded with 0x90 (the port to match).
+;                 set_pins = none (0x90) or D0..D4 (0xE9),  jmp_pin = /RD,
+;                 side-set = off (0x90) or GPIO 29 /BUSDIR pindir (0xE9),
+;                 and Y preloaded with the port to match.
 
-.program msx_p90_read_responder
+.program msx_status_read_responder
+.side_set 1 opt pindirs
 
 .wrap_target
-p90_top:
+status_top:
     wait 0 gpio 26                ; /IORQ low — an I/O cycle is starting
-    jmp pin p90_top              ; jmp_pin=/RD; /RD high => not a read => respin
-    mov isr, null                ; clear ISR (no stale high bits in the compare)
-    in pins, 8                   ; ISR = A0..A7 (the I/O port number)
+    jmp pin status_top            ; jmp_pin=/RD; /RD high => not a read => respin
+    mov isr, null                 ; clear ISR (no stale high bits in the compare)
+    in pins, 8                    ; ISR = A0..A7 (the I/O port number)
     mov x, isr
-    jmp x!=y p90_top             ; port != 0x90 => do NOT drive, respin
-    mov pins, null               ; preset D0..D7 = 0x00 (value before enabling OE)
-    mov osr, ~null               ; OSR = 0xFFFFFFFF
-    out pindirs, 8               ; pindirs = 0xFF => drive D0..D7 (outputs 0x00)
-    wait 1 gpio 24               ; hold the byte until /RD rises (read cycle ends)
-    mov osr, null                ; OSR = 0
-    out pindirs, 8               ; pindirs = 0x00 => tri-state D0..D7 again
+    jmp x!=y status_top           ; port != Y => do NOT drive, respin
+    mov pins, null                ; preset D0..D7 = 0x00 (value before enabling OE)
+    set pins, 5                   ; this SM's SET pins get 00101 (none on SM2)
+    mov osr, ~null                ; OSR = 0xFFFFFFFF
+    out pindirs, 8      side 1    ; drive D0..D7, and pull /BUSDIR low (SM3)
+    wait 1 gpio 24                ; hold the byte until /RD rises (read cycle ends)
+    mov osr, null                 ; OSR = 0
+    out pindirs, 8      side 0    ; tri-state D0..D7 again, release /BUSDIR
 .wrap

@@ -56,7 +56,7 @@ fi
 # Probed by looking for the drive rather than by asking picotool: picotool 2.3.0
 # segfaults instead of reporting "no device" when nothing is attached, so it
 # cannot be used as a presence test.
-BOOTSEL=$(python3 "$(dirname "$0")/host/rp2_drive.py" 2>/dev/null || true)
+BOOTSEL=$(node "$(dirname "$0")/../node/bin/rp2_drive.js" 2>/dev/null || true)
 if [ -n "$BOOTSEL" ]; then
   echo "[*] BOOTSEL mode ($BOOTSEL mounted)"
 

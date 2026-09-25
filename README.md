@@ -27,9 +27,12 @@ the computer has:
 | **a hard disk** | 128 MB of Nextor that is really a file on the computer. Change it there and the MSX sees it |
 | **a printer** | `LPRINT` comes out on the computer as PDF, text or raster |
 | **`PDASK`** | the MSX asks a question and the computer answers — a web search, by default |
+| **sound** | the PSG played on the computer, and MIDI: the cartridge is also a USB MIDI device |
+| **`PDVOICE`** | the MSX says something out loud through its own sound chip |
 
 The ROM menu and the mapper are still there; the disk is simply the first entry
-on the menu. A Python program on the computer serves all of it.
+on the menu. A Node.js program on the computer serves all of it, with a screen
+in your browser at <http://127.0.0.1:8080/>.
 
 ---
 
@@ -100,23 +103,28 @@ taken for it.** On a real MSX2 you do not need it: use the dummy plug.
 
 ## Setting up
 
-**macOS** — Python 3 is already there. One package:
+The one thing to install is **Node.js 18 or newer** (<https://nodejs.org>, or
+`brew install node` on macOS). No Python, no Pico SDK, no ARM toolchain, no sdcc
+— the cartridge image in `dist/` is already built.
 
-```sh
-python3 -m pip install --user pyserial
-```
-
-**Windows** — run this once:
+The first `serve.sh` fetches the one package the server needs to reach the
+cartridge (`serialport`) into `dist/node/node_modules/`. On **Windows**, run this
+once instead and it does the same, stopping with an explanation if anything is
+missing:
 
 ```bat
 dist\setup.bat
 ```
 
-It finds Python, installs **pyserial** and **windows-curses**, and stops with an
-explanation if anything is missing. The second package is what draws the server's
-split-screen view; macOS has that built into Python and Windows does not.
-`setup.bat` also works around Windows' `python.exe` that is not Python but a
-Microsoft Store placeholder.
+[dist/WINDOWS.md](dist/WINDOWS.md) walks through the whole installation on
+Windows, including how to hear the MSX's MIDI there.
+
+On **Linux**, `dist/disk/99-picodock.rules` gives you access to the serial port
+and keeps ModemManager off it:
+
+```sh
+sudo cp dist/disk/99-picodock.rules /etc/udev/rules.d/
+```
 
 Every command below is given both ways. Under Git Bash or WSL the `.sh` versions
 work on Windows too, and the `.bat` is unnecessary.
@@ -150,6 +158,9 @@ Switch on the MSX and pick **PicoDock Disk (Nextor)** from the menu. You get an
 
 Leave the server running for as long as you are using the MSX — it sits through
 resets and reflashing without needing a restart. **Ctrl-C ends it.**
+
+While it runs, <http://127.0.0.1:8080/> shows the disk, the printer, `PDASK` and
+the sound. It listens on this computer only. `--no-web` turns it off.
 
 ---
 
@@ -294,6 +305,9 @@ To answer the questions yourself instead of searching:
 dist\disk\serve.bat --ask manual   # Windows
 ```
 
+Claude and Gemini can answer too: pick one on the web screen and give it your
+API key there. The key is kept in memory for that run and never written to disk.
+
 Answers are cut to 500 characters — an MSX screen is 40 columns and nobody wants
 five pages of it.
 
@@ -306,11 +320,53 @@ A> PDINFO
 ```
 
 Sends what the MSX knows about itself — machine, slots, memory, the cartridge it
-found — to the computer, where it appears in the server's Status pane.
+found — to the computer, where it appears on the web screen.
 
 Run it first when something is not behaving. It is also the quickest way to
 answer *is the cartridge even being seen*: if `PDINFO` says
 `No PicoDock found`, nothing else is worth trying until that is fixed.
+
+---
+
+## Sound and MIDI
+
+The web screen plays the MSX's PSG on the computer as it happens. The cartridge
+is also a USB MIDI device called **PicoDock**, sending two kinds of MIDI:
+
+| | |
+|---|---|
+| **MIDI-PAC** | the cartridge listens to the PSG and writes notes from it. Any MSX software; switched on, and given an instrument, on the web screen |
+| **MSX-MIDI** | software that drives the MSX-MIDI ports (`MIDRY /I5` and the like) writes real MIDI, and the cartridge passes it through untouched |
+
+MIDI is only notes. Something on the computer has to play it — GarageBand or
+any synthesiser on macOS; on Windows, see [dist/WINDOWS.md](dist/WINDOWS.md).
+
+### `PDMIDI` — an MSX without MSX-MIDI
+
+MSX-MIDI software checks the interface's status port (0xE9) before it sends
+anything. A machine with no MSX-MIDI of its own — a Sony HB-F1XD, say — has
+nothing there, and the software stops with *I/F not found*. Run this once per
+boot, or put it in `AUTOEXEC.BAT`:
+
+```
+A> PDMIDI
+```
+
+It tells the cartridge to answer "ready to send", and only after checking that
+nothing else answers that port. On an OCM, or any machine with MSX-MIDI of its
+own, it sees the port answering already and does nothing. An MSX-MIDI cartridge
+that its software has not yet moved up to 0xE8 still answers at 0xE1, and
+`PDMIDI` leaves that alone too.
+
+## `PDVOICE`
+
+```
+A> PDVOICE hello there
+```
+
+The computer turns the text into speech and the MSX plays it through its own
+PSG. It uses the computer's speech engine: `say` on macOS, the built-in voices
+on Windows, `espeak-ng` or `piper` elsewhere.
 
 ---
 
@@ -322,21 +378,24 @@ documentation, and it cannot drift from the code because it lives in it.
 
 ```sh
 head -40 dist/disk/serve.sh                 # macOS
-head -40 dist/disk/tools/pd_diskserver.py
+head -60 dist/node/bin/pdserve.js
 
 type dist\disk\serve.bat                    # Windows
-type dist\disk\tools\pd_diskserver.py
 ```
 
-`dist/README.md` describes what is in that folder and why.
+[node/README.md](node/README.md) says what each program on the computer side is.
 
 ---
 
 ## Licence
 
-**CC BY-NC-SA 4.0** — non-commercial, share alike. PicoDock is derived from
-**[MSX PicoVerse](https://github.com/cristianoag/msx-picoverse-public)** by
-Cristiano Goncalves, under the same licence.
+Two programs, two licences:
 
-Nextor, the printer pipeline and the fonts have their own terms. See
-[NOTICE.md](NOTICE.md) — some of it is GPL and some of it is not ours to sell.
+| | |
+|---|---|
+| **the cartridge** — firmware, menu, MSX-DOS tools | **CC BY-NC-SA 4.0** — non-commercial, share alike. Derived from **[MSX PicoVerse](https://github.com/cristianoag/msx-picoverse-public)** by Cristiano Goncalves, under the same licence ([LICENSE](LICENSE)) |
+| **the computer side** — `node/`, and the shims in `src/host/` that run it | **GPL-2.0-only** ([node/LICENSE](node/LICENSE)). Its printer code carries openMSX and DOSBox-X logic, which makes the whole program GPL |
+
+Nextor, the Pico SDK, TinyUSB, Fusion-C and the fonts have their own terms. See
+[NOTICE.md](NOTICE.md) and [node/NOTICE.md](node/NOTICE.md) — some of it is GPL
+and some of it is not ours to sell.

@@ -77,8 +77,20 @@ typedef void (*pd_rx_sink_t)(uint8_t byte);
 void pd_usb_set_rx_sink(pd_rx_sink_t sink);
 void pd_usb_set_poll_hook(void (*hook)(void));
 
+// 파이프에 **프레임이 반쯤 나가 있는가.** 블록 백엔드는 한 프레임을 여러 번에
+// 나눠 쓰므로(blk_tx_pump), 그 사이에 남이 끼어들면 프레임이 찢어진다. 끼어들
+// 수 있는 쪽(PSG 스트림)이 이걸 물어보고 비켜선다.
+//
+// 훅이 없으면 항상 false 다 - 단일 생산자 모드에서는 물어볼 것이 없다.
+void pd_usb_set_pipe_busy_hook(bool (*hook)(void));
+bool pd_usb_pipe_busy(void);
+
 // Write bytes to the host. **core1 only** (TinyUSB is not multi-core safe).
 // Returns how many bytes were accepted; the caller retries the rest later.
 uint32_t pd_usb_write(const uint8_t *buf, uint32_t len);
+
+// 지금 몇 바이트가 통째로 들어가는가. 프레임은 잘리면 못 쓰므로
+// 보내기 전에 이걸로 확인한다.
+uint32_t pd_usb_write_room(void);
 
 #endif // PD_USB_H

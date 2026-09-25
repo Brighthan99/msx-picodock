@@ -48,6 +48,10 @@ cp "$B/sunride.asm" "$B/sunride.patched.asm"
 patch -p0 --quiet "$B/sunride.patched.asm" < "$HERE/picodock-drv_basstat.patch" \
   || { patch -p0 "$B/sunride.patched.asm" < "$HERE/picodock-drv_basstat.patch"; }
 
+# WAIT_BSY 를 1 초에서 6 초로. 호스트 건너편 디스크가 USB 재열거를 마칠 시간.
+patch -p0 --quiet "$B/sunride.patched.asm" < "$HERE/picodock-waitbsy.patch" \
+  || { patch -p0 "$B/sunride.patched.asm" < "$HERE/picodock-waitbsy.patch"; }
+
 # 3) kernel base = the stock ROM minus the driver bank (bank count lives at 0xFE)
 python3 - "$STOCK" "$B/nextor_base.dat" <<'PY'
 import sys

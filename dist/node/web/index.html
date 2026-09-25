@@ -1,0 +1,3520 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<!--
+  index.html — the PicoDock server, seen in a browser.
+
+  No build step, no CDN, no framework. The server that ships this page may be
+  running on a machine with no internet, and a page that needs a download to
+  render is a page that fails exactly when you need it. Everything is in this
+  file.
+
+  Screen text is English only. That is a standing decision for this project:
+  the cartridge goes to people who do not read Korean, and a half-translated
+  screen is worse than either language on its own.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PicoDock</title>
+<style>
+  :root {
+    --bg: #14161a;  --panel: #1b1e24;  --line: #2a2f38;
+    --fg: #d6dae2;  --dim: #7d8794;    --head: #e8ecf2;
+    --ok: #57c77f;  --warn: #e2b341;   --err: #e86a6a;  --note: #6fa8ea;
+    --accent: #6fa8ea;
+    --press: #ff5a4d;   /* 눌린 건반. --err 를 쓰지 않는 이유는 그쪽이
+                           "오류" 라는 뜻을 이미 갖고 있기 때문이다. */
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9;  --panel: #fff;   --line: #e1e4ea;
+      --fg: #262a31;  --dim: #6b727d;  --head: #11141a;
+      --ok: #1d8348;  --warn: #9a6b06; --err: #c0392b; --note: #1f6fb2;
+      --press: #e0392b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--head); }
+  header .ver { color: var(--dim); font-size: 12px; }
+  .spacer { flex: 1; }
+  .lamp { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .dot.off { background: var(--err); }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  nav {
+    width: 156px; flex: none; border-right: 1px solid var(--line);
+    background: var(--panel); padding: 8px 0; overflow-y: auto;
+  }
+  nav button {
+    display: flex; width: 100%; align-items: baseline; gap: 9px;
+    background: none; border: 0; color: var(--fg); cursor: pointer;
+    padding: 8px 16px; font: inherit; text-align: left;
+    border-left: 3px solid transparent;
+  }
+  nav button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  nav button[aria-current="true"] {
+    border-left-color: var(--accent); color: var(--head); font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  nav .key { color: var(--dim); font-size: 11px; font-weight: 400; }
+  nav .badge {
+    margin-left: auto; font-size: 11px; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  section.pane { flex: 1; min-width: 0; display: none; flex-direction: column; }
+  section.pane.show { display: flex; }
+
+  .log {
+    flex: 1; overflow-y: auto; padding: 10px 16px 28px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+  }
+  .log .row { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
+  .log .t { color: var(--dim); flex: none; }
+  .log .what { min-width: 0; }
+  .log .ok { color: var(--ok); } .log .err { color: var(--err); }
+  .log .warn { color: var(--warn); } .log .note { color: var(--note); }
+  .log .dim { color: var(--dim); }
+  .log .empty { color: var(--dim); padding: 24px 0; font-family: inherit; }
+
+  /* A bar over a log. Right-aligned so it never sits where the eye reads. */
+  .logbar {
+    display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+    padding: 6px 16px; flex: none;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .logbar button {
+    padding: 4px 12px; border-radius: 5px; font: inherit; font-size: 12px;
+    cursor: pointer; border: 1px solid var(--line);
+    background: var(--bg); color: var(--dim);
+  }
+  .logbar button:hover { color: var(--fg); border-color: var(--dim); }
+  .logbar button:active { transform: translateY(1px); }
+
+  /* --- Files ------------------------------------------------------------ */
+  .files-sum { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  .files-empty { color: var(--dim); padding: 24px 0; }
+  .tree { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; }
+  .tree ul { list-style: none; margin: 0; padding-left: 17px; }
+  .tree > ul { padding-left: 0; }
+  .tree li { white-space: nowrap; }
+  .tree .ent { display: flex; gap: 10px; align-items: baseline;
+               border-radius: 4px; padding: 0 5px; }
+  .tree .ent:hover { background: var(--panel); }
+  /* 디렉터리만 접힌다. 파일에는 삼각형 자리만 비워 둬 이름이 맞물린다. */
+  .tree .tw { width: 13px; flex: none; color: var(--dim); cursor: pointer;
+              user-select: none; }
+  .tree .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .tree .d .nm { color: var(--head); font-weight: 600; }
+  .tree .sz { color: var(--dim); text-align: right; flex: none;
+              font-variant-numeric: tabular-nums; }
+  .tree .at { color: var(--dim); flex: none; opacity: .75; }
+  .tree .lfn { color: var(--note); opacity: .8; }
+  .tree .ent.openable { cursor: pointer; }
+  .tree .ent.openable .nm { text-decoration: underline;
+                            text-decoration-color: var(--line);
+                            text-underline-offset: 3px; }
+  .tree .ent.openable:hover .nm { text-decoration-color: var(--accent); }
+  .tree li.shut > ul { display: none; }
+  @media (max-width: 620px) { .tree .at { display: none; } }
+
+  /* 왼쪽 트리 / 오른쪽 편집기. 편집기는 열렸을 때만 자리를 가져간다. */
+  .filesplit { flex: 1; display: flex; min-height: 0; }
+  .filesplit > .body { flex: 1; min-width: 0; }
+  .editor { display: none; flex-direction: column; min-width: 0;
+            flex: 1.2; border-left: 1px solid var(--line); background: var(--panel); }
+  .editor.show { display: flex; }
+  .ed-bar { display: flex; gap: 8px; align-items: center; padding: 6px 12px;
+            border-bottom: 1px solid var(--line); }
+  .ed-name { font-family: var(--mono); font-size: 12.5px; color: var(--head);
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ed-info { color: var(--dim); font-size: 11.5px; font-family: var(--mono);
+             white-space: nowrap; }
+  .ed-note { color: var(--warn); font-size: 11.5px; }
+  .ed-note.clean { color: var(--dim); }
+  .ed-bar select { font: inherit; font-size: 12px; padding: 2px 5px;
+                   border-radius: 4px; border: 1px solid var(--line);
+                   background: var(--bg); color: var(--fg); }
+  .ed-bar button { font: inherit; font-size: 12px; padding: 3px 10px;
+                   border-radius: 4px; cursor: pointer;
+                   border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .ed-bar button:disabled { opacity: .4; cursor: not-allowed; }
+  .ed-bar button#ed-save:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  #ed-text {
+    flex: 1; margin: 0; border: 0; resize: none; padding: 10px 12px;
+    background: var(--bg); color: var(--fg); tab-size: 4;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre; overflow: auto;
+  }
+  #ed-text:focus { outline: none; }
+  #ed-text:disabled { opacity: .6; }
+  @media (max-width: 900px) { .filesplit { flex-direction: column; }
+                              .editor { border-left: 0; border-top: 1px solid var(--line); } }
+  .tree .pick { flex: none; margin: 0 2px 0 0; cursor: pointer; }
+  .files-picked { color: var(--note); font-size: 12px; font-family: var(--mono); }
+  .files-picked.warn { color: var(--warn); }
+  .logbar button.danger:not(:disabled) { color: var(--err); border-color: var(--err); }
+  .logbar button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* 드롭 자리. 판 전체를 덮되, 끌고 들어왔을 때만 보인다. */
+  section.pane[data-view="files"] { position: relative; }
+  .drop {
+    position: absolute; inset: 0; display: none; z-index: 5;
+    align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    border: 2px dashed var(--accent); border-radius: 6px;
+  }
+  .drop.show { display: flex; }
+  .drop-in { text-align: center; pointer-events: none; }
+  .drop-big { font-size: 17px; color: var(--head); font-weight: 600; }
+  .drop-to { margin-top: 6px; color: var(--accent); font-family: var(--mono); font-size: 13px; }
+  /* 끌고 지나가는 폴더를 짚어 준다 - 어디로 들어갈지 미리 보여야 한다. */
+  .tree li.d.over > .ent { outline: 1px solid var(--accent); background: var(--panel); }
+
+  /* 확인 대화. 지우기는 되돌릴 수 없어서 따로 묻는다. */
+  .modal { position: fixed; inset: 0; display: none; z-index: 20;
+           align-items: center; justify-content: center;
+           background: color-mix(in srgb, #000 55%, transparent); }
+  .modal.show { display: flex; }
+  .modal-box { background: var(--panel); border: 1px solid var(--line);
+               border-radius: 8px; padding: 18px 20px; width: min(520px, 92vw); }
+  .modal-box h3 { margin: 0 0 10px; color: var(--head); font-size: 15px; }
+  .modal-list { font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+                max-height: 220px; overflow-y: auto; background: var(--bg);
+                border: 1px solid var(--line); border-radius: 5px;
+                padding: 8px 10px; white-space: pre-wrap; word-break: break-all; }
+  .modal-note { color: var(--warn); font-size: 12.5px; margin: 10px 0 0; }
+  .modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .modal-row button { padding: 7px 16px; border-radius: 5px; font: inherit;
+                      cursor: pointer; border: 1px solid var(--line);
+                      background: var(--bg); color: var(--fg); }
+  .modal-row button.danger { border-color: var(--err); color: var(--err); }
+  .modal-row button.go { border-color: var(--accent); color: var(--accent); }
+  /* 실패는 요약줄에 쓰면 안 된다. 실패하면 곧바로 트리를 다시 읽고, 그것이
+     같은 자리를 덮어써서 메시지가 깜빡이고 사라진다 - 실제로 그랬다. */
+  .errbar { display: none; align-items: flex-start; gap: 10px; flex: none;
+            padding: 7px 14px; background: color-mix(in srgb, var(--err) 14%, transparent);
+            border-bottom: 1px solid var(--err); color: var(--fg);
+            font-size: 12.5px; font-family: var(--mono); white-space: pre-wrap; }
+  .errbar.show { display: flex; }
+  .errbar span { flex: 1; min-width: 0; }
+  .errbar button { font: inherit; font-size: 14px; line-height: 1; padding: 0 5px;
+                   border: 0; background: none; color: var(--dim); cursor: pointer; }
+  .errbar button:hover { color: var(--fg); }
+
+  .modal-row2 { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .modal-row2 label { color: var(--dim); font-size: 12.5px; flex: none;
+                      min-width: 1.5em; }
+  .modal-row2 input { flex: 1; min-width: 0; }
+  .modal-hint { color: var(--dim); font-size: 11.5px; min-height: 1.3em;
+                margin: 0 0 8px; font-family: var(--mono); }
+  .modal-hint.warn { color: var(--warn); }
+  /* 미리보기는 크게. 작게 보여 주면 인쇄 전에 확인이 안 된다. */
+  .docbox { width: min(900px, 94vw); height: min(88vh, 1000px);
+            display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+  .docbar-top { display: flex; gap: 8px; align-items: center;
+                padding: 8px 12px; border-bottom: 1px solid var(--line);
+                background: var(--panel); flex: none; }
+  .docbar-top button { font: inherit; font-size: 12px; padding: 4px 12px;
+                       border-radius: 4px; cursor: pointer;
+                       border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .docbar-top button.go { border-color: var(--accent); color: var(--accent); }
+  #doc-frame { flex: 1; width: 100%; border: 0; background: #525659; }
+  #docbar select { font: inherit; font-size: 12px; padding: 2px 5px;
+                   border-radius: 4px; border: 1px solid var(--line);
+                   background: var(--bg); color: var(--fg); }
+
+  /* 지금 어느 폴더에 있는지. 새로 만드는 것들이 여기로 들어간다. */
+  .crumb { display: flex; align-items: center; gap: 2px; font-family: var(--mono);
+           font-size: 12px; min-width: 0; }
+  .crumb button { font: inherit; padding: 2px 6px; border: 0; border-radius: 4px;
+                  background: none; color: var(--dim); cursor: pointer;
+                  max-width: 14ch; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
+  .crumb button:hover { color: var(--fg); background: var(--bg); }
+  .crumb button:last-child { color: var(--accent); }
+  .crumb .sep { color: var(--line); }
+  /* 고른 폴더. 체크 표시와는 다른 것이다 - 체크는 지우고 이름 바꿀 대상이고,
+     이쪽은 "지금 여기" 다. */
+  .tree li.d.here > .ent { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .tree li.d.here > .ent .nm { color: var(--accent); }
+  .modal-was { color: var(--dim); font-family: var(--mono); font-size: 12.5px;
+               margin-bottom: 8px; word-break: break-all; }
+  .modal-box input[type=text] {
+    width: 100%; box-sizing: border-box; font: inherit; font-family: var(--mono);
+    padding: 8px 10px; border-radius: 5px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg);
+  }
+  .modal-box input[type=text]:focus { outline: none; border-color: var(--accent); }
+  .modal-box input.bad { border-color: var(--err); }
+
+  .body { flex: 1; overflow-y: auto; padding: 18px 20px 56px; }
+  .body > * { max-width: 820px; }        /* 읽기 좋은 폭은 안쪽에 - 위 주석 참조 */
+  .body h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--dim); margin: 22px 0 10px; font-weight: 600; }
+  .body h2:first-child { margin-top: 0; }
+  .body p { margin: 0 0 10px; color: var(--fg); }
+  .body p.dim { color: var(--dim); }
+  .body code, .body pre {
+    font-family: var(--mono); font-size: 12.5px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  }
+  .body code { padding: 1px 5px; }
+  .body pre { padding: 10px 12px; overflow-x: auto; margin: 0 0 10px; }
+
+  table.facts { border-collapse: collapse; width: 100%; max-width: 560px; }
+  table.facts td { padding: 5px 0; vertical-align: top; }
+  table.facts td:first-child { color: var(--dim); width: 140px; }
+  table.facts td:last-child { font-family: var(--mono); font-size: 12.5px; }
+
+  .switch {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 13px 0; border-bottom: 1px solid var(--line);
+  }
+  .switch:last-of-type { border-bottom: 0; }
+  .switch .txt { flex: 1; min-width: 0; }     /* 안의 넓은 것이 넘쳐 잘리지 않게 */
+  .switch .name { color: var(--head); font-weight: 600; }
+  .switch .why { color: var(--dim); font-size: 13px; margin-top: 3px; }
+  .switch .fixed { color: var(--dim); font-size: 12px; padding-top: 2px; }
+  button.toggle {
+    flex: none; width: 52px; height: 28px; border-radius: 14px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); position: relative;
+    transition: background .15s;
+  }
+  button.toggle::after {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 20px; height: 20px; border-radius: 50%; background: var(--dim);
+    transition: transform .15s, background .15s;
+  }
+  button.toggle[aria-pressed="true"] { background: color-mix(in srgb, var(--ok) 28%, transparent); }
+  button.toggle[aria-pressed="true"]::after { transform: translateX(24px); background: var(--ok); }
+  button.toggle:disabled { opacity: .45; cursor: not-allowed; }
+
+  .asker { border-top: 1px solid var(--line); padding: 12px 16px; background: var(--panel); }
+  .asker .q { color: var(--head); margin-bottom: 8px; }
+  .asker .q .none { color: var(--dim); font-weight: 400; }
+  .asker form { display: flex; gap: 8px; }
+  .asker input {
+    flex: 1; padding: 7px 10px; border-radius: 5px; font: inherit;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  .asker input:disabled { opacity: .5; }
+  .asker button {
+    padding: 7px 14px; border-radius: 5px; font: inherit; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  .asker button.primary { border-color: var(--accent); color: var(--accent); }
+  /* 누가 답하나. 두 상태뿐이라 드롭다운보다 두 칸이 읽기 쉽다 - 지금 어느
+     쪽인지가 한눈에 보이고, 바꾸는 데 한 번만 누르면 된다. */
+  .askbar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .askwho { color: var(--dim); font-size: 12px; margin-right: 2px; }
+  .asker button.seg { font-size: 12px; padding: 4px 12px; border-radius: 5px;
+                      color: var(--dim); }
+  .asker button.seg[aria-pressed="true"] {
+    border-color: var(--accent); color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .asker button:disabled { opacity: .45; cursor: not-allowed; }
+  .askbar[hidden] { display: none; }
+  /* 키 칸은 답 칸만큼 넓을 이유가 없다. 붙여 넣고 누르면 곧바로 비워진다. */
+  .asker input.apikey { flex: 0 1 26ch; padding: 4px 8px; font-size: 12px;
+                        font-family: var(--mono); }
+
+  .scope {
+    margin-top: 14px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--panel); padding: 10px 12px;
+  }
+  .scope { min-width: 0; }
+  .scope canvas { display: block; width: 100%; height: 120px; }
+  .scope .meta {
+    display: flex; gap: 16px; margin-top: 8px; color: var(--dim);
+    font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  .scope .meta b { color: var(--fg); font-weight: 600; }
+  .chans { margin-top: 12px; display: grid; gap: 6px; }
+  .chan { display: grid; grid-template-columns: 18px minmax(60px, 1fr) 92px minmax(0, 110px);
+          align-items: center; gap: 10px; font-family: var(--mono); font-size: 12px; }
+  .chan .who { color: var(--head); font-weight: 600; }
+  .chan .bar { height: 14px; background: var(--panel); border: 1px solid var(--line);
+               border-radius: 3px; overflow: hidden; }
+  .chan .fill { height: 100%; width: 0; background: var(--ok); transition: width .06s linear; }
+  .chan .hz { color: var(--fg); text-align: right; font-variant-numeric: tabular-nums; }
+  .chan .what { color: var(--dim); }
+  .chan.off .who, .chan.off .hz { color: var(--dim); }
+
+  .mrow { display: grid; grid-template-columns: 22px 22px minmax(60px, 1fr) 80px minmax(0, 1.2fr);
+          align-items: center; gap: 9px; font-family: var(--mono); font-size: 12px;
+          margin-top: 10px; }
+  .mrow .num { color: var(--dim); text-align: right; }
+  .mrow .icon { font-size: 15px; line-height: 1; text-align: center;
+                font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; }
+  .mrow .eq { display: flex; gap: 2px; align-items: flex-end; height: 26px; }
+  .mrow .eq i { flex: 1; background: var(--accent); border-radius: 1px 1px 0 0;
+                min-height: 1px; height: 1px; transition: height .06s linear; opacity: .9; }
+  .mrow .lvl { height: 18px; background: var(--panel); border: 1px solid var(--line);
+               border-radius: 3px; overflow: hidden; }
+  .mrow .lvl i { display: block; height: 100%; width: 0; background: var(--ok);
+                 transition: width .06s linear; }
+  .mrow .nm { color: var(--fg); overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; }
+  .mrow.off .icon, .mrow.off .nm { opacity: .4; }
+
+  /* 눌린 음을 보여 주는 건반. MIDI 는 음마다 on/off 가 오므로, 지금 눌린
+     음높이의 집합만 들고 있으면 그대로 그릴 수 있다. */
+  .keys { position: relative; height: 30px; margin: 5px 0 2px 44px;
+          border: 1px solid var(--line); border-radius: 3px; overflow: hidden;
+          background: var(--panel); }
+  .keys i { position: absolute; top: 0; bottom: 0; display: block; }
+  .keys i.w { background: var(--bg); border-right: 1px solid var(--line); }
+  .keys i.b { background: var(--fg); opacity: .55; height: 62%; z-index: 2;
+              border-radius: 0 0 2px 2px; }
+  .keys i.on { background: var(--press); opacity: 1; }
+  .keys i.b.on { background: var(--press); opacity: 1; }
+  /* 건반 감추기. display:none 이 아니라 부모에 클래스를 걸어 한 번에 끈다 -
+     행마다 건반이 따로 있어서 하나씩 만지면 갱신 때마다 어긋난다. */
+  .nokeys .keys { display: none; }
+  button[aria-pressed="true"]#midikeys {
+    border-color: var(--accent); color: var(--accent);
+  }
+
+  .vol { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .vol label { color: var(--dim); font-size: 13px; }
+  .vol input { flex: 1; max-width: 220px; accent-color: var(--accent); }
+
+  .jobs { border-bottom: 1px solid var(--line); background: var(--panel);
+          max-height: 34%; overflow-y: auto; }
+  .jobs table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .jobs th { text-align: left; color: var(--dim); font-weight: 600; font-size: 11px;
+             text-transform: uppercase; letter-spacing: .05em;
+             padding: 7px 14px; position: sticky; top: 0; background: var(--panel); }
+  .jobs td { padding: 6px 14px; border-top: 1px solid var(--line); }
+  .jobs tr.pick { cursor: pointer; }
+  .jobs tr.pick:hover td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .jobs tr.on td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .jobs .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .jobs .why { color: var(--dim); }
+  .jobs .none { color: var(--dim); padding: 16px 14px; font-size: 13px; }
+  .paper { flex: 1; overflow: auto; padding: 12px 16px; }
+  .paper canvas { display: block; image-rendering: pixelated;
+                  background: #fff; margin: 0 auto 14px; max-width: 100%;
+                  border: 1px solid var(--line); }
+  .paper .pageno { color: var(--dim); font-size: 12px; text-align: center;
+                   margin-bottom: 4px; font-family: var(--mono); }
+  .paper pre { margin: 0; font-family: var(--mono); font-size: 12.5px;
+               white-space: pre-wrap; word-break: break-word; }
+  .paper pre.cjk { font-size: 17px; line-height: 1.75; letter-spacing: .02em;
+                   font-family: "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans KR",
+                                "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  .paper .hint { color: var(--dim); font-size: 13px; padding: 20px 0;
+                 font-family: system-ui, sans-serif; }
+  .paperbar { display: flex; gap: 10px; align-items: center; padding: 8px 16px;
+              border-top: 1px solid var(--line); background: var(--panel);
+              font-size: 13px; color: var(--dim); }
+  .paperbar select { font: inherit; padding: 3px 6px; border-radius: 4px;
+                     border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .paperbar .pbgroup { display: flex; align-items: center; gap: 6px; }
+  .paperbar .pbgroup[hidden] { display: none; }
+  .paperbar button { font: inherit; font-size: 12px; padding: 3px 9px;
+                     border-radius: 4px; cursor: pointer;
+                     border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .paperbar button:hover { color: var(--fg); border-color: var(--dim); }
+  .paperbar .pbnum { font-family: var(--mono); font-size: 12px; min-width: 42px;
+                     text-align: center; font-variant-numeric: tabular-nums; }
+  /* 배율은 그린 크기를 건드리지 않는다 - 캔버스는 픽셀 그대로 두고 화면에서만
+     늘린다. 다시 그리면 ESC/P 를 매번 해석해야 하고, 그건 배율 한 칸에
+     치르기엔 비싸다. */
+  .paper canvas { transform-origin: top center; }
+
+  #gone {
+    display: none; position: fixed; inset: auto 0 0 0; padding: 9px 16px;
+    background: var(--err); color: #fff; text-align: center; font-size: 13px;
+  }
+  #gone.show { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PicoDock</h1>
+  <span class="ver" id="image">—</span>
+  <span class="spacer"></span>
+  <span class="lamp"><span class="dot" id="lamp"></span><span id="linktext">connecting…</span></span>
+</header>
+
+<main>
+  <nav id="tabs"></nav>
+
+  <section class="pane" data-view="disk">
+    <div class="logbar">
+      <button type="button" id="clear-disk" title="Empty this pane">Clear</button>
+    </div>
+    <div class="log" id="log-disk"></div>
+  </section>
+
+  <section class="pane" data-view="files">
+    <div class="logbar">
+      <span id="files-cwd" class="crumb"></span>
+      <span id="files-sum" class="files-sum">&mdash;</span>
+      <span style="flex:1"></span>
+      <span id="files-picked" class="files-picked"></span>
+      <button type="button" id="files-new"
+              title="Make an empty text file">New file</button>
+      <button type="button" id="files-mkdir"
+              title="Make a folder">New folder</button>
+      <button type="button" id="files-ren" disabled
+              title="Give the one ticked entry a new name">Rename</button>
+      <button type="button" id="files-del" disabled
+              title="Remove the ticked entries from the image">Delete</button>
+      <button type="button" id="files-refresh"
+              title="Re-read the image. This list follows the MSX on its own; press this after changing the image from the host (disk_put, or a Finder mount while paused).">Refresh</button>
+    </div>
+    <div class="errbar" id="files-err">
+      <span id="files-err-text"></span>
+      <button type="button" id="files-err-x" title="Dismiss">&times;</button>
+    </div>
+    <div class="filesplit">
+      <div class="body" id="files-body">
+        <div class="files-empty">Reading the image&hellip;</div>
+      </div>
+      <div class="editor" id="editor">
+        <div class="ed-bar">
+          <span id="ed-name" class="ed-name">&mdash;</span>
+          <span style="flex:1"></span>
+          <span id="ed-info" class="ed-info"></span>
+          <span id="ed-note" class="ed-note"></span>
+          <select id="ed-cs" title="How the bytes are read and written back">
+            <option value="">auto</option>
+            <option value="ascii">ascii</option>
+            <option value="shift_jis">shift_jis</option>
+            <option value="cp949">cp949</option>
+            <option value="latin-1">latin-1</option>
+          </select>
+          <button type="button" id="ed-save" disabled>Save</button>
+          <button type="button" id="ed-close" title="Close the editor">&times;</button>
+        </div>
+        <textarea id="ed-text" spellcheck="false" wrap="off"></textarea>
+      </div>
+    </div>
+    <div class="drop" id="files-drop"><div class="drop-in">
+      <div class="drop-big">Drop files here</div>
+      <div class="drop-to" id="files-dropto">to the root of the image</div>
+    </div></div>
+  </section>
+
+  <div class="modal" id="docview">
+    <div class="modal-box docbox">
+      <div class="docbar-top">
+        <span id="doc-info" class="ed-info"></span>
+        <span style="flex:1"></span>
+        <button type="button" id="doc-save">Save PDF</button>
+        <button type="button" id="doc-open" class="go"
+                title="Open the document in the Mac's Preview app. Printing is a second step there, with the system dialog - so nothing goes to paper by accident.">Open in Preview</button>
+        <button type="button" id="doc-close" title="Close">&times;</button>
+      </div>
+      <iframe id="doc-frame" title="Document preview"></iframe>
+    </div>
+  </div>
+
+  <div class="modal" id="prompt">
+    <div class="modal-box">
+      <h3 id="prompt-title">New name</h3>
+      <div class="modal-was" id="prompt-was"></div>
+      <div class="modal-row2" id="prompt-into-row">
+        <label for="prompt-into">In</label>
+        <input type="text" id="prompt-into" spellcheck="false" autocomplete="off"
+               placeholder="/  (the root)">
+      </div>
+      <div class="modal-hint" id="prompt-into-note"></div>
+      <input type="text" id="prompt-input" spellcheck="false" autocomplete="off">
+      <p class="modal-note" id="prompt-note">8.3 only &mdash; up to 8 characters,
+         optionally a dot and up to 3 more. No spaces.</p>
+      <div class="modal-row">
+        <button type="button" id="prompt-no">Cancel</button>
+        <button type="button" id="prompt-yes" class="go">Rename</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="confirm">
+    <div class="modal-box">
+      <h3 id="confirm-title">Remove from the image?</h3>
+      <div class="modal-list" id="confirm-list"></div>
+      <p class="modal-note" id="confirm-note"></p>
+      <div class="modal-row">
+        <button type="button" id="confirm-no">Cancel</button>
+        <button type="button" id="confirm-yes" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <section class="pane" data-view="print">
+    <div class="logbar" id="directbar">
+      <label class="files-auto"
+             title="Send every print job to a real printer the moment the MSX finishes it, with nobody in the middle. The job is still kept as a file either way - paper is not the copy.">
+        <input type="checkbox" id="direct-on"> Print straight through
+      </label>
+      <!-- **잠그지 않는다.** 프린터를 고르는 것과 자동 전송을 켜는 것은 다른
+           일이다. 묶어 두었더니 자동을 꺼 놓고는 고를 자리가 없어서, 한 장만
+           보내려는 사람이 들어갈 문이 없었다. -->
+      <select id="direct-to"
+              title="Where a job goes when you print it. Choosing one does not send anything by itself."></select>
+      <select id="direct-rotate" disabled
+              title="Receipt paper is narrow. Upright fits the page across the head by shrinking it; sideways keeps full resolution but runs the page's width down the roll - which costs a lot more paper (the MSX logo banner: 0.6cm upright, 10.3cm sideways).">
+        <option value="auto">fit: auto</option>
+        <option value="off">fit: upright</option>
+        <option value="on">fit: sideways</option>
+      </select>
+      <span id="direct-note" class="ed-info"></span>
+      <span style="flex:1"></span>
+      <span id="direct-stat" class="ed-info"></span>
+    </div>
+    <div class="logbar" id="docbar">
+      <span id="doc-picked" class="files-picked"></span>
+      <!-- 프린터로 보내는 것은 문서를 만드는 것과 다른 일이라, Font 와
+           one page 사이에 끼우지 않고 왼쪽에 떨어뜨려 둔다. 그 둘은 문서에만
+           걸리는데, 같은 묶음에 있으면 인쇄에도 걸리는 줄 읽힌다. -->
+      <button type="button" id="print-now" class="go" disabled
+              title="Merge the ticked jobs and send them to the chosen printer now, as one continuous print.">Print straight through</button>
+      <span style="flex:1"></span>
+      <label class="files-auto" title="msx: the printer's own glyphs, exactly as it printed. host: the text set again in a bundled font - readable, but the ESC/P layout and any bit images are lost.">
+        Font
+        <select id="doc-style">
+          <option value="msx">MSX (printer glyphs)</option>
+          <option value="host">Host (readable)</option>
+        </select>
+      </label>
+      <label class="files-auto" title="Lay the jobs end to end down as few sheets as possible, instead of a sheet each. Three short LPRINTs then take one sheet, not three."><input type="checkbox" id="doc-stack" checked> one page</label>
+      <button type="button" id="doc-make" disabled
+              title="Merge the ticked jobs into one document">Make document</button>
+    </div>
+    <div class="jobs" id="jobs">
+      <div class="none">Nothing has been printed yet &mdash;
+        try <code>LPRINT "IT WORKS"</code> on the MSX.</div>
+    </div>
+    <div class="paper" id="paper">
+      <div class="hint">Pick a job above to read it.</div>
+    </div>
+    <div class="paperbar">
+      <span id="paperinfo">&mdash;</span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="pbgroup" id="pb-zoom" hidden>
+        <button type="button" id="zoom-out" title="Smaller">&minus;</button>
+        <span id="zoom-now" class="pbnum">100%</span>
+        <button type="button" id="zoom-in" title="Bigger">+</button>
+        <button type="button" id="zoom-fit" title="Fit the width">Fit</button>
+      </span>
+      <span class="pbgroup" id="pb-cs" hidden>
+        <label for="cs">Read as</label>
+        <select id="cs">
+          <option value="">auto</option>
+          <option value="cp437">cp437</option>
+          <option value="shift_jis">shift_jis</option>
+          <option value="utf-8">utf-8</option>
+          <option value="latin-1">latin-1</option>
+        </select>
+      </span>
+      <span class="pbgroup" id="pb-save" hidden>
+        <button type="button" id="save-txt" title="Save the decoded text">.txt</button>
+        <button type="button" id="save-png" title="Save the page as an image">.png</button>
+        <button type="button" id="save-prn" title="Save the raw printer bytes, exactly as the MSX sent them">.prn</button>
+      </span>
+    </div>
+    <div class="log" id="log-print" style="max-height:26%;border-top:1px solid var(--line)"></div>
+  </section>
+
+  <section class="pane" data-view="ask">
+    <div class="log" id="log-ask"></div>
+    <div class="asker">
+      <div class="askbar">
+        <span class="askwho">Answered by</span>
+        <button type="button" id="ask-google" class="seg">Web search</button>
+        <button type="button" id="ask-manual" class="seg">Me</button>
+        <button type="button" id="ask-echo" class="seg"
+                title="Send back exactly what the MSX sent">Echo</button>
+        <button type="button" id="ask-claude" class="seg"
+                title="Ask Claude - needs an API key">Claude</button>
+        <button type="button" id="ask-gemini" class="seg"
+                title="Ask Gemini - needs an API key">Gemini</button>
+        <span style="flex:1"></span>
+        <span id="ask-note" class="ed-info"></span>
+      </div>
+      <!-- 폼이 아니다: 폼을 제출하면 브라우저가 비밀번호로 저장하자고 나선다. -->
+      <div class="askbar" id="claude-row" hidden>
+        <span class="askwho">Claude key</span>
+        <input id="claude-key" class="apikey" type="password" placeholder="sk-ant-..."
+               autocomplete="off" spellcheck="false" data-1p-ignore
+               data-lpignore="true" data-bwignore="true"
+               title="Held in the server's memory only and never saved - enter it again after a restart">
+        <button type="button" id="claude-use" class="seg">Use</button>
+        <button type="button" id="claude-forget" class="seg">Forget</button>
+        <span style="flex:1"></span>
+        <span id="claude-note" class="ed-info"></span>
+      </div>
+      <div class="askbar" id="gemini-row" hidden>
+        <span class="askwho">Gemini key</span>
+        <input id="gemini-key" class="apikey" type="password" placeholder="Gemini API key"
+               autocomplete="off" spellcheck="false" data-1p-ignore
+               data-lpignore="true" data-bwignore="true"
+               title="Held in the server's memory only and never saved - enter it again after a restart">
+        <button type="button" id="gemini-use" class="seg">Use</button>
+        <button type="button" id="gemini-forget" class="seg">Forget</button>
+        <span style="flex:1"></span>
+        <span id="gemini-note" class="ed-info"></span>
+      </div>
+      <div class="askbar">
+        <span class="askwho">Reply with</span>
+        <button type="button" id="ask-rtext" class="seg">Text</button>
+        <button type="button" id="ask-rvoice" class="seg">Voice</button>
+        <button type="button" id="ask-rboth" class="seg">Both</button>
+        <span style="flex:1"></span>
+        <span id="ask-rnote" class="ed-info"></span>
+      </div>
+      <div class="q" id="askq"><span class="none">Nothing has been asked yet.</span></div>
+      <form id="askform">
+        <input id="askinput" placeholder="Type an answer for the MSX…" autocomplete="off" disabled>
+        <button class="primary" id="asksend" disabled>Send</button>
+        <button type="button" id="askno" disabled>Refuse</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="pane" data-view="sound">
+    <div class="body">
+      <h2>Three ways to hear the MSX</h2>
+      <p class="dim">They are independent and can run at the same time. Two of
+        them leave the cartridge as USB-MIDI and never pass through this server.</p>
+
+      <div class="switch">
+        <button class="toggle" id="sw-psg" aria-pressed="false"></button>
+        <div class="txt">
+          <div class="name">PSG raw &mdash; the square wave itself</div>
+          <div class="why">The cartridge sends the PSG's fourteen registers
+            down the serial link fifty times a second, and this page rebuilds
+            the AY-3-8910 from them. The same sound as the machine's own chip,
+            which is useful when that chip is dead. The synthesis happens in
+            your browser, so the server needs no audio device and nothing has
+            to be installed for it.</div>
+        </div>
+      </div>
+
+      <div class="vol">
+        <label for="vol">Volume</label>
+        <input type="range" id="vol" min="0" max="100" value="80">
+        <span id="volnum" style="color:var(--dim);font-size:13px">80%</span>
+      </div>
+
+      <div class="scope">
+        <canvas id="spectrum" width="960" height="240"></canvas>
+        <div class="chans" id="chans"></div>
+        <div class="meta">
+          <span>buffered <b id="st-q">—</b></span>
+          <span>frames <b id="st-f">0</b></span>
+          <span>underruns <b id="st-u">0</b></span>
+          <span id="st-note"></span>
+        </div>
+      </div>
+
+      <div class="switch">
+        <button class="toggle" id="sw-midipac" aria-pressed="false"></button>
+        <div class="txt">
+          <div class="name">MIDI-PAC &mdash; PSG translated to MIDI</div>
+          <div class="why">The cartridge watches the PSG and writes MIDI notes
+            from what it sees. The timbre becomes a General MIDI instrument, so
+            the square wave is gone. Works on any MSX, needs no support from the
+            software running on it. Which instrument it becomes is your choice -
+            the same GM number sounds different in every soundfont, and one that
+            reads as a chiptune in one reads as a piano in another.</div>
+      <div class="vol" id="progrow">
+          <label for="prog">Instrument</label>
+          <select id="prog" style="flex:0 1 240px">
+            <option value="80">80 — Lead 1 (square)</option>
+            <option value="81">81 — Lead 2 (sawtooth)</option>
+            <option value="82">82 — Lead 3 (calliope)</option>
+            <option value="84">84 — Lead 5 (charang)</option>
+            <option value="87">87 — Lead 8 (bass + lead)</option>
+            <option value="38">38 — Synth Bass 1</option>
+            <option value="62">62 — Synth Brass 1</option>
+            <option value="30">30 — Distortion Guitar</option>
+            <option value="0">0 — Acoustic Grand Piano</option>
+          </select>
+          <span id="prognote" style="color:var(--dim);font-size:12px"></span>
+        </div>
+        </div>
+      </div>
+
+      <div class="switch">
+        <div class="fixed">always on</div>
+        <div class="txt">
+          <div class="name">MSX-MIDI &mdash; what the MSX itself sends</div>
+          <div class="why">Software that drives the MSX-MIDI ports (MIDRY /I5
+            and the like) writes real MIDI; the cartridge passes it through
+            untouched, so what you hear is what the composer wrote. There is
+            nothing to switch &mdash; with no such software there is no traffic.
+            While it is flowing, MIDI-PAC stays quiet so the two do not overlap.
+            On an MSX without MSX-MIDI (HB-F1XD and the like) run
+            <code>PDMIDI</code> once first, or the software reports
+            &ldquo;I/F not found&rdquo;; an OCM needs nothing.</div>
+
+        </div>
+      </div>
+
+      <h2>MIDI monitor</h2>
+      <p class="dim">What the cartridge is sending as USB-MIDI &mdash; <b>both</b>
+        paths above. They share one cable, and while MSX-MIDI is flowing the
+        cartridge keeps MIDI-PAC quiet, so they never overlap. The browser reads
+        the device directly, alongside whatever synthesiser is playing it.</p>
+      <div class="scope" id="midiscope" style="margin-left:0">
+        <div class="meta" style="margin:0 0 8px">
+          <span id="midistate">MIDI monitor is off</span>
+          <span style="color:var(--dim)">bars are octaves C1&ndash;C8, not audio</span>
+          <span style="flex:1"></span>
+          <button id="midikeys" aria-pressed="false" style="font:inherit;padding:3px 10px;
+                  border-radius:4px;border:1px solid var(--line);background:var(--bg);
+                  color:var(--fg);cursor:pointer;margin-right:6px">Keyboard</button>
+          <button id="midiwatch" style="font:inherit;padding:3px 10px;border-radius:4px;
+                  border:1px solid var(--line);background:var(--bg);color:var(--fg);
+                  cursor:pointer">Watch the MIDI</button>
+        </div>
+        <div class="chans" id="midichans"></div>
+      </div>
+
+      <h2>Hearing the two MIDI paths</h2>
+      <p class="dim">They do not go through this server. The cartridge is a
+        USB-MIDI device named <code>PicoDock</code>, so a synthesiser has to run
+        on this computer. Most of them scan for inputs once, at startup.</p>
+      <pre>General MIDI   fluidsynth -a coreaudio -m coremidi \
+                          -o midi.autoconnect=1 font.sf2      (macOS)
+               fluidsynth -a alsa -m alsa_seq font.sf2, then
+                          aconnect PicoDock to it              (Linux)
+               fluidsynth -a wasapi -m winmidi \
+                          -o midi.autoconnect=1 font.sf2      (Windows)
+               or Qsynth, the same with a window - see WINDOWS.md
+               Soundfonts are a separate download.
+
+MT-32/CM-32L   Munt (mt32emu). Needs the Roland ROMs, which are
+               not distributed - dump your own hardware.</pre>
+    </div>
+  </section>
+
+  <section class="pane" data-view="voice">
+    <div class="body">
+      <h2>The MSX speaking</h2>
+      <p class="dim">The host synthesises, the cartridge holds the samples, and
+        the Z80 pours them into the PSG's volume registers &mdash; which become a
+        DAC once the tone generators are switched off. Nothing is added to the
+        machine. <code>PDVOICE hello</code> from DOS says it. Whether
+        <code>PDASK</code> answers aloud is set on the Ask pane.</p>
+
+      <div class="switch">
+        <button class="toggle" id="sw-voice" aria-pressed="false"></button>
+        <div class="txt">
+          <div class="name">Voice &mdash; on</div>
+          <div class="why">With this off the cartridge is told no, rather than
+            left waiting for a sound that is not coming.</div>
+        </div>
+      </div>
+
+      <div class="switch">
+        <button class="toggle" id="sw-monitor" aria-pressed="false"></button>
+        <div class="txt">
+          <div class="name">Monitor &mdash; hear it here too</div>
+          <div class="why">Plays in this browser what the MSX is being sent,
+            starting the moment the MSX starts playing it. The Sound pane's
+            <i>PSG raw</i> cannot carry speech &mdash; it samples the registers
+            fifty times a second and speech changes them ten thousand times &mdash;
+            so it is hushed while the MSX talks, monitor on or not. This is what
+            the MSX <i>received</i>; its speaker may still colour it.</div>
+        </div>
+      </div>
+
+      <div class="vol">
+        <label for="v-engine">Engine</label>
+        <select id="v-engine" style="flex:0 1 320px"></select>
+        <span id="v-engine-why" style="color:var(--dim);font-size:12px"></span>
+      </div>
+
+      <div class="vol">
+        <label for="v-lang">Language</label>
+        <select id="v-lang" style="flex:0 1 170px">
+          <option value="en">en &mdash; English</option>
+          <option value="ko">ko &mdash; Korean</option>
+          <option value="ja">ja &mdash; Japanese</option>
+          <option value="es">es &mdash; Spanish</option>
+          <option value="fr">fr &mdash; French</option>
+          <option value="de">de &mdash; German</option>
+        </select>
+        <label for="v-name" style="margin-left:12px">Voice</label>
+        <select id="v-name" style="flex:1 1 220px"></select>
+        <span id="v-name-why" style="color:var(--dim);font-size:12px"></span>
+      </div>
+
+      <div class="vol">
+        <label for="v-deliver">Deliver by</label>
+        <select id="v-deliver" style="flex:0 1 320px"></select>
+        <span id="v-deliver-why" style="color:var(--dim);font-size:12px"></span>
+      </div>
+      <p class="dim" style="margin:-4px 0 14px;font-size:12px">
+        <b>Streaming</b> hands the cartridge samples while the MSX plays, which
+        means the Z80 reads the bus for every one of them &mdash; and that read
+        is the only thing here whose timing is not ours. The other two put the
+        whole utterance in the MSX's memory first and play from there, reading
+        nothing while it sounds. They are slower to start and bounded by how
+        much RAM is free, so the three are worth hearing against each other.
+      </p>
+
+      <div class="scope" style="margin-left:0">
+        <div class="meta" style="margin:0">
+          <span>state <b id="v-state">idle</b></span>
+          <span>rate <b id="v-rate">&mdash;</b></span>
+          <span>sent <b id="v-sent">0</b></span>
+          <span>played <b id="v-played">0</b></span>
+          <span id="v-note" style="color:var(--warn)"></span>
+          <span style="flex:1"></span>
+          <button id="v-stop" style="font:inherit;padding:3px 10px;border-radius:4px;
+                  border:1px solid var(--line);background:var(--bg);color:var(--fg);
+                  cursor:pointer">Stop</button>
+        </div>
+        <p class="dim" style="margin:10px 0 0;font-size:12px">The rate is
+          <b>measured, not assumed</b>. How quickly the Z80 gets round its loop
+          depends on how much of the bus the VDP is taking, and that differs
+          from machine to machine &mdash; so the host watches how fast the
+          cartridge's ring drains and synthesises the next sentence to match.
+          The first one after a restart is a guess.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="pane" data-view="status">
+    <div class="body">
+      <h2>Cartridge</h2>
+      <table class="facts" id="facts-link"></table>
+      <h2>Disk image</h2>
+      <table class="facts" id="facts-disk"></table>
+      <div class="switch" style="margin-top:8px">
+        <button class="toggle" id="sw-pause" aria-pressed="false"></button>
+        <div class="txt">
+          <div class="name">Pause the image</div>
+          <div class="why">Block requests are answered with an error instead of
+            data, so the image can be mounted and edited on this computer
+            without writing behind the MSX's back. Run <code>PDSYNC</code> on
+            the MSX afterwards so MSX-DOS re-reads it.</div>
+        </div>
+      </div>
+      <h2>PSG</h2>
+      <table class="facts" id="facts-psg"></table>
+      <h2>Printer</h2>
+      <table class="facts" id="facts-print"></table>
+      <h2>Ask</h2>
+      <table class="facts" id="facts-ask"></table>
+    </div>
+  </section>
+
+  <section class="pane" data-view="help">
+    <div class="body">
+      <h2>PicoDock server</h2>
+      <p>The MSX sees a hard disk, a printer and a few extras that do not exist.
+        This server is the other half of them: the cartridge asks over USB and
+        the answers are made here, on this computer.</p>
+      <p class="dim">Nothing has to be configured. Start it, switch the MSX on,
+        and the panes fill in as the MSX uses each thing.</p>
+
+      <h2>The panes</h2>
+      <table class="facts">
+        <tr><td>Disk</td><td>Sectors as they are read and written.</td></tr>
+        <tr><td>Files</td><td>What is on the image now, and how to change it.
+            Drop files on it to add them &mdash; on a folder to put them there.
+            Tick entries and press <b>Delete</b> to remove them; tick exactly
+            one for <b>Rename</b>. <b>Delete</b> stays greyed out while a ticked
+            folder has anything in it, and says which one &mdash; a folder is only
+            removed when it is empty, so one tick can never take a hundred files
+            with it. <b>Click a folder</b> to work in it &mdash; the
+            trail at the top left says where you are, and <b>New file</b> /
+            <b>New folder</b> start there &mdash; and the <b>In</b> box in the
+            dialog can be typed into, so somewhere you have not walked to works
+            as well. Folders nest, so a folder inside a folder is fine. The
+            triangle folds a folder without moving into it.
+            Click a text file (<code>.BAT</code>,
+            <code>.TXT</code>, <code>.INI</code>&hellip;) to edit it here &mdash;
+            the line endings and the BASIC EOF byte are kept as they were.
+            A file whose bytes cannot be reproduced exactly opens read-only, and
+            so does one that is not text at all &mdash; a <code>.BAS</code> saved
+            without <code>,A</code> is tokenised, not text, however it is named. The list follows
+            the MSX on its own; changes made from the host need <b>Refresh</b>.
+            <b>After any change, run <code>PDSYNC</code> on the MSX</b>, or Nextor
+            keeps showing the old directory.</td></tr>
+        <tr><td>Printer</td><td>Print jobs, and where their bytes were kept. Pick
+            one to read it; <b>.txt</b> / <b>.png</b> / <b>.prn</b> save it. Tick
+            several and <b>Make document</b> merges them into one PDF &mdash; in
+            the printer's own glyphs, or set again in a host font that is
+            readable but loses the ESC/P layout. <b>one page</b> lays them end
+            to end instead of giving each a sheet, so three short jobs take one
+            sheet rather than three. <b>Print&hellip;</b> opens it in
+            Preview so the system dialog picks the printer, copies and range.
+            With <code>--spool</code> every byte lands in one file, so this is
+            the way to get a job back out.</td></tr>
+        <tr><td>Ask</td><td><code>CALL PDASK("…")</code> — what the MSX asked
+            and what went back. A <b>web search</b> answers by default; switch to
+            <b>Me</b> to type it yourself. You can still type one while the search
+            is on, for when it brings back the wrong thing.</td></tr>
+        <tr><td>Sound</td><td>Three ways to hear the machine, and how to switch them.</td></tr>
+        <tr><td>Status</td><td>What is true right now, rather than what happened.</td></tr>
+      </table>
+
+      <h2>Swapping files on the image</h2>
+      <p class="dim">Pause the image first (Status pane), then mount it here.
+        Pausing makes this server answer with an error rather than letting the
+        MSX write underneath you. After a change, run <code>PDSYNC</code> on the
+        MSX so MSX-DOS re-reads the directory.</p>
+
+      <h2>When something looks wrong</h2>
+      <table class="facts">
+        <tr><td>No cartridge</td><td>Use a normal data cable, not a charge-only one. The Status pane says what it can see.</td></tr>
+        <tr><td>Enumerates, then disappears</td><td>Two 5V supplies are fighting: the cartridge is powered by the MSX slot and by USB.</td></tr>
+        <tr><td>Printing hangs</td><td>On a 1chipMSX/OCM run <code>PDFRCPRN</code> once.</td></tr>
+        <tr><td>MIDI but no sound</td><td>Nothing on this computer is synthesising it. See the Sound pane.</td></tr>
+      </table>
+
+      <h2>On Linux, once</h2>
+      <p class="dim">The port belongs to the <code>dialout</code> group, and
+        ModemManager probes every new serial device to see whether it is a modem.
+        Its probe holds the port, and it also raises DTR — which the cartridge
+        reads as "the server is here", so Nextor can boot to
+        <code>&lt;failed&gt;</code>.</p>
+<pre>sudo usermod -aG dialout $USER        then log out and back in
+sudo cp 99-picodock.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules &amp;&amp; sudo udevadm trigger</pre>
+      <p class="dim">The rule names only this cartridge, so ModemManager keeps
+        running and your actual modems keep working. Replug afterwards.</p>
+
+      <h2>This page</h2>
+      <p class="dim">It is served on the loopback address only. It can pause
+        your disk and switch cartridge features, so it is deliberately not
+        reachable from the rest of the network.</p>
+    </div>
+  </section>
+</main>
+
+<div id="gone">Lost the server. Retrying…</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // 스크립트가 초기화 중에 죽으면 페이지는 멀쩡해 보이면서 아무것도 안 먹는다.
+  // 콘솔을 열기 전에는 서버가 죽은 것과 구별되지 않는다 - 그래서 여기서
+  // 잡아 화면에 그린다. 한 번 그 함정에 빠지고 나서 넣었다.
+  function fatal(err) {
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;inset:0;background:#1b1e24;color:#e86a6a;"
+      + "font:13px ui-monospace,Menlo,monospace;padding:24px;overflow:auto;z-index:99";
+    box.textContent = "This page failed to start.\n\n" + (err && err.stack || err)
+      + "\n\nThe server is probably fine - reload after fixing this.";
+    box.style.whiteSpace = "pre-wrap";
+    document.body.append(box);
+  }
+  try {
+
+  const VIEWS = [
+    { id: "disk",   name: "Disk",    key: "1", log: true },
+    { id: "files",  name: "Files",   key: "2" },
+    { id: "print",  name: "Printer", key: "3", log: true },
+    { id: "ask",    name: "Ask",     key: "4", log: true },
+    { id: "sound",  name: "Sound",   key: "5" },
+    { id: "voice",  name: "Voice",   key: "6" },
+    { id: "status", name: "Status",  key: "7" },
+    { id: "help",   name: "Help",    key: "8" },
+  ];
+
+  // Which hub channel feeds which pane. `io` is the sector traffic, which is
+  // far noisier than everything else - it gets its own ring so one busy load
+  // cannot push the one line that mattered off the top.
+  const CHANNEL_PANE = { link: "disk", disk: "disk", io: "disk",
+                         print: "print", ask: "ask" };
+
+  const MAX_ROWS = 400;      // per pane, in the DOM
+  const $ = (id) => document.getElementById(id);
+  let state = null;
+
+  // ---------------------------------------------------------------- tabs
+  const nav = $("tabs");
+  const counts = {};
+  // **읽기도 감싼다.** 사이트 데이터가 막혀 있거나 시크릿 창이면 접근 자체가
+  // 던진다. 쓰기만 감싸 두었다가 이 줄에서 스크립트가 통째로 죽었고, 화면은
+  // "connecting" 에 멈춘 채 버튼도 아무것도 안 먹었다 (2026-09-21).
+  let current = "status";
+  try { current = localStorage.getItem("pd.view") || "status"; } catch { /* 막혀 있다 */ }
+  if (!VIEWS.some((v) => v.id === current)) current = "status";
+
+  for (const v of VIEWS) {
+    const b = document.createElement("button");
+    b.innerHTML = `<span class="key">${v.key}</span><span>${v.name}</span>`
+                + (v.log ? `<span class="badge" data-count="${v.id}"></span>` : "");
+    b.onclick = () => show(v.id);
+    b.dataset.view = v.id;
+    nav.append(b);
+  }
+
+  function show(id) {
+    current = id;
+    try { localStorage.setItem("pd.view", id); } catch { /* private window */ }
+    for (const b of nav.children) b.setAttribute("aria-current", String(b.dataset.view === id));
+    for (const s of document.querySelectorAll("section.pane"))
+      s.classList.toggle("show", s.dataset.view === id);
+    if (id === "ask") $("askinput").focus();
+    // 창을 열 때 한 번 읽는다. 안 보고 있는 동안 쌓인 쓰기를 따라가느라
+    // 트리를 계속 다시 읽는 것은 아무도 안 보는 화면을 위한 일이다.
+    if (id === "files" && !filesSeen) askFiles();
+  }
+
+  addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
+    const v = VIEWS.find((x) => x.key === e.key);
+    if (v) { show(v.id); e.preventDefault(); }
+  });
+
+  // ---------------------------------------------------------------- log
+  //
+  // Events carry fields, not sentences (that is the whole point of the hub),
+  // so the wording lives here. An event with no entry below still shows up -
+  // as its channel, name and fields - because a line you cannot read beats a
+  // line that was never drawn.
+  const WORDS = {
+    "link/connected":  (e) => ["ok",   `cartridge on ${e.port}`],
+    "link/lost":       (e) => ["err",  `link lost (${e.error})`],
+    "link/waiting":    ()  => ["dim",  "waiting for the cartridge"],
+    "link/open_failed":(e) => ["err",  `cannot open ${e.port} — ${e.error}`],
+    "link/several":    (e) => ["warn", `${e.devices.length} cartridges; use --port`],
+    "link/ambiguous":  (e) => ["warn", e.reason],
+    "link/image":      (e) => ["note", `image ${e.path} — ${e.blocks} blocks`],
+    "disk/paused":     (e) => ["warn", `image paused (${e.reason}) - not serving`],
+    "disk/resumed":    (e) => ["ok",   `image back - ${e.blocks} blocks`],
+    "disk/mount_at":   (e) => ["note", `mounted at ${e.at.join(", ")}`],
+    "disk/tidied":     (e) => ["ok",   `tidied up after macOS: ${e.text}`],
+    "disk/tidy_failed":(e) => ["err",  `could not tidy the image: ${e.error}`],
+    "disk/note":       (e) => ["dim",  e.text],
+    "disk/info":       (e) => ["note", `capacity told: ${e.blocks} blocks x ${e.sector}B`
+                                     + (e.readonly ? " (read-only)" : "")],
+    "io/read":         (e) => ["dim",  `read   lba ${e.lba}${e.count > 1 ? ` +${e.count}` : ""}`],
+    "io/write":        (e) => ["",     `write  lba ${e.lba}${e.count > 1 ? ` +${e.count}` : ""}`],
+    "io/read_error":   (e) => ["err",  `read past the end: lba ${e.lba}`],
+    "io/write_error":  (e) => ["err",  `bad write: lba ${e.lba}`],
+    "io/write_refused":(e) => ["warn", `write refused (read-only): lba ${e.lba}`],
+    "print/job_start": ()  => ["note", "a print job started"],
+    "print/job_end":   (e) => ["ok",   `job ended — ${e.size} bytes`],
+    "print/spool_open":(e) => ["note", `spooling to ${e.path}`],
+    "print/spool_job": (e) => ["ok",   `job ${e.job} indexed — ${e.size} bytes`],
+    "print/saved":     (e) => ["ok",   `saved ${e.path}`],
+    "print/bytes":     null,                    // too noisy; job_end says it
+    "ask/question":    (e) => ["note", `MSX asks: ${e.text}`],
+    "ask/answering":   (e) => ["dim",  `looking up: ${e.text}`],
+    "ask/answer":      (e) => ["ok",   `answered (${e.bytes}B${e.truncated ? ", cut" : ""}): ${e.text}`],
+    "ask/delivered":   ()  => ["ok",   "the MSX has it"],
+    "ask/error":       (e) => ["err",  e.text],
+    "ask/timeout":     ()  => ["warn", "the MSX never acknowledged — gave up"],
+    "ask/cancelled":   (e) => ["warn", `cancelled by ${e.by}`],
+    "ask/garbled":     ()  => ["warn", "garbled request — resyncing"],
+    "ask/note":        (e) => ["dim",  e.text],
+    "ask/bytes":       null,
+    "ask/msx":         (e) => ["note", e.fields && e.fields.length
+                                     ? `this MSX: ${e.fields.map(([k, v]) => `${k} ${v}`).join(" | ")}`
+                                     : `machine report: ${e.raw}`],
+    "ask/api_key":     (e) => e.set ? ["ok", `${e.who} key accepted (${e.model}) - held in memory only`]
+                                    : ["dim", `${e.who} key forgotten`],
+  };
+
+  const hhmmss = (t) => new Date(t * 1000).toTimeString().slice(0, 8);
+
+  function put(ev) {
+    const pane = CHANNEL_PANE[ev.ch];
+    if (!pane) return;
+    const key = `${ev.ch}/${ev.ev}`;
+    if (key in WORDS && WORDS[key] === null) return;
+
+    let cls = "", text;
+    if (WORDS[key]) {
+      try { [cls, text] = WORDS[key](ev); }
+      catch { text = key; }                     // a field we did not expect
+    } else {
+      const rest = Object.entries(ev)
+        .filter(([k]) => !["seq", "t", "ch", "ev"].includes(k))
+        .map(([k, v]) => `${k}=${v}`).join(" ");
+      [cls, text] = ["dim", `${key} ${rest}`];
+    }
+
+    const box = $("log-" + pane);
+    const stuck = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<span class="t"></span><span class="what ${cls}"></span>`;
+    row.children[0].textContent = hhmmss(ev.t);
+    row.children[1].textContent = text;
+    box.append(row);
+    while (box.childElementCount > MAX_ROWS) box.firstElementChild.remove();
+    // Only follow the tail if you were already at it. Scrolling up to read
+    // something and being yanked back down is the worst thing a log can do.
+    if (stuck) box.scrollTop = box.scrollHeight;
+
+    counts[pane] = (counts[pane] || 0) + 1;
+    const badge = nav.querySelector(`[data-count="${pane}"]`);
+    if (badge) badge.textContent = counts[pane] > 999 ? "999+" : counts[pane];
+
+    // 디스크가 바뀌었을 만한 순간들. io/write 는 MSX 가 쓴 것이고, 나머지 둘은
+    // 호스트가 이미지를 돌려준 순간이다 (Finder 마운트나 disk_put 뒤).
+    if (key === "io/write" || key === "disk/resumed" || key === "disk/tidied")
+      filesMaybeStale();
+  }
+
+  // Empty one pane's log.
+  //
+  // **This clears the view, not the hub.** The server's ring buffer keeps its
+  // events, so a reload or a second browser still shows the history - the same
+  // rule the terminal UI's clear key followed, and for the same reason: one
+  // person tidying their own screen must not delete what another is reading.
+  // The count badge is reset with it, because a cleared pane still showing
+  // "342" reads as a bug.
+  function clearPane(pane) {
+    const box = $("log-" + pane);
+    if (!box) return;
+    box.replaceChildren();
+    counts[pane] = 0;
+    const badge = nav.querySelector(`[data-count="${pane}"]`);
+    if (badge) badge.textContent = "";
+  }
+
+  $("clear-disk").addEventListener("click", () => clearPane("disk"));
+
+  // ---------------------------------------------------------------- files
+  //
+  // 이미지 안의 트리를 보여 준다. 서버가 FAT 을 읽어서 주고, 여기서는 그리기만
+  // 한다 - 브라우저가 128MB 이미지를 받아 제 나름대로 해석하는 일은 없다.
+  //
+  // **왜 자동 갱신이 되는가.** MSX 가 디스크에 쓰면 그 쓰기는 반드시 이 서버를
+  // 지나간다 (그게 이 카트리지의 전부다). 서버는 그것을 io/write 로 내보내고
+  // 있었으므로, 이 화면은 이미 그 신호를 받고 있었다 - 새 배관이 필요 없었다.
+  //
+  // **그래도 Refresh 가 따로 있는 이유.** 호스트가 이미지를 바꾸는 길이 따로
+  // 있다: disk_put 이나, 일시정지 중의 Finder 마운트. 그쪽은 MSX 를 거치지
+  // 않으니 io/write 가 안 생긴다. 즉 자동 갱신은 **MSX 가 쓴 것만** 따라간다.
+  //
+  // **끄는 스위치는 두지 않는다.** 처음에는 뒀는데, 그건 끄고 싶을 이유가
+  // 있어서가 아니라 다시 그릴 때 스크롤이 튀어서였다. 그 결함을 고치고 나니
+  // (자리 지키기 + 안 바뀌면 안 그리기 + 읽기 0.5ms) 끌 이유가 남지 않았다.
+  // 결함을 가리려고 넣은 스위치는 결함을 고치면 같이 나가야 한다.
+  let filesSeen = false;         // 이 창을 한 번이라도 열었나
+  let filesTimer = null;
+  let lastTree = null;           // 마지막으로 그린 것 - 같으면 다시 안 그린다
+  const shutDirs = new Set();    // 접어 둔 디렉터리 (경로)
+  const picked = new Set();      // 체크해 둔 것 (지울/이름 바꿀 대상)
+  let cwd = "";                  // 지금 고른 폴더. "" 는 루트. 새로 만드는
+                                 // 것들이 여기로 들어간다.
+  let treeNow = null;            // 마지막으로 받은 트리 - 고른 것이 뭔지 알아야 한다
+
+  const KB = (n) => n < 1024 ? `${n} B`
+                  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB`
+                  : `${(n / 1048576).toFixed(1)} MB`;
+
+  // 보낸 요청을 종류별로 추적한다. 답이 섞여 오므로 id 로 갈라야 한다 -
+  // 트리 읽기의 실패와 이미지 고치기의 실패는 다루는 법이 다르다.
+  const filesWaiting = new Set();
+  const editWaiting = new Map();
+  let editId = 100;
+  //: 키가 있어야 답하는 쪽들: [서버의 이름, 화면의 이름].
+  const KEYED = [["claude", "Claude"], ["gemini", "Gemini"]];
+  //: 키를 보내 놓고 답을 기다리는 명령의 id, 그리고 거절당한 이유. 이유는
+  //: 다음 스냅샷이 덮어쓰지 않게 따로 둔다.
+  const keyWaiting = { claude: null, gemini: null };
+  const keyNote = { claude: "", gemini: "" };
+  let filesRetry = 0;
+
+  function askFiles() {
+    // 소켓이 열려 있을 때만. 페이지를 띄운 직후 show() 가 이걸 부르는데 그때는
+    // 아직 연결 전이라, 그냥 보내면 "Not connected" 배너가 한 번 깜빡인다.
+    // 연결되면 onopen 이 다시 부른다.
+    if (!ws || ws.readyState !== 1) return;
+    const id = ++editId;
+    filesWaiting.add(id);
+    if (send({ cmd: "files", id })) filesSeen = true;
+  }
+
+  /** 쓰기가 멎은 뒤에 한 번만 읽는다. MSX 한 번의 저장이 수십 섹터라서,
+      쓰기마다 읽으면 같은 트리를 수십 번 그린다. 그리고 쓰기 도중의 디렉터리는
+      반쯤 갱신된 상태일 수 있으니, 조용해지기를 기다리는 편이 정확하기도 하다. */
+  function filesMaybeStale() {
+    if (current !== "files") { filesSeen = false; return; }  // 열 때 다시 읽는다
+    clearTimeout(filesTimer);
+    filesTimer = setTimeout(askFiles, 1200);
+  }
+
+  function drawTree(data) {
+    const body = $("files-body");
+    // **보던 자리를 지킨다.** 트리를 통째로 다시 그리므로 그냥 두면 스크롤이
+    // 맨 위로 튄다. 자동 갱신이 켜져 있으면 MSX 가 저장할 때마다 읽던 목록이
+    // 위로 끌려간다는 뜻이다 - Disk 창이 이미 막아 둔 바로 그것인데 (거기
+    // 주석: "읽으려고 올려놨는데 아래로 끌려가는 것이 로그가 할 수 있는
+    // 최악") 이 창에 옮겨 오는 것을 빠뜨렸다.
+    const wasAt = body.scrollTop;
+
+    // **안 바뀌었으면 손대지 않는다.** MSX 의 쓰기가 늘 트리를 바꾸지는 않는다 -
+    // 있던 파일에 덮어쓰면 목록은 그대로다. 그때 다시 그리면 아무 이유 없이
+    // 화면이 깜빡이고 마우스가 짚고 있던 줄이 사라진다.
+    const sig = JSON.stringify(data);
+    treeNow = data;
+    prunePicked(data);
+    drawPicked();
+    if (sig === lastTree) return;
+    lastTree = sig;
+
+    const v = data.volume;
+    $("files-sum").textContent =
+      `${v.files} files, ${v.dirs} dirs - ${KB(v.bytes)} used, ${KB(v.freeBytes)} free`
+      + ` - ${v.clusterBytes / 1024}KB clusters`;
+
+    if (!data.root.length) {
+      body.innerHTML = '<div class="files-empty">The image is empty.</div>';
+      return;
+    }
+    const esc = (t) => String(t).replace(/[&<>]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+    const li = (n, path) => {
+      const full = path + "/" + n.name;
+      const shut = n.dir && shutDirs.has(full);
+      const tw = n.dir ? (shut ? "\u25b8" : "\u25be") : "";
+      const long = n.long ? ` <span class="lfn">(${esc(n.long)})</span>` : "";
+      const size = n.dir ? "" : KB(n.size);
+      const ticked = picked.has(full) ? " checked" : "";
+      let out = `<li class="${n.dir ? "d" : "f"}${shut ? " shut" : ""}" data-p="${esc(full)}">`
+        + `<div class="ent">`
+        + `<input type="checkbox" class="pick"${ticked} data-p="${esc(full)}">`
+        + `<span class="tw">${tw}</span>`
+        + `<span class="nm">${esc(n.name)}${long}</span>`
+        + `<span class="sz">${size}</span>`
+        + `<span class="at">${esc(n.at || "")}</span></div>`;
+      if (n.dir) out += `<ul>${(n.children || []).map((c) => li(c, full)).join("")}</ul>`;
+      return out + "</li>";
+    };
+    body.innerHTML = `<div class="tree"><ul>${data.root.map((n) => li(n, "")).join("")}</ul></div>`
+      + (v.truncated ? '<div class="files-empty">Too many entries - the list is cut short.</div>' : "");
+
+    for (const el of body.querySelectorAll(".pick")) {
+      el.onclick = (e) => {
+        e.stopPropagation();                 // 접기 핸들러까지 가면 안 된다
+        const path = el.dataset.p;
+        if (el.checked) picked.add(path); else picked.delete(path);
+        drawPicked();
+      };
+    }
+    for (const el of body.querySelectorAll("li.f > .ent")) {
+      const host = el.parentElement;
+      if (!canEdit(host.dataset.p.split("/").pop())) continue;
+      el.classList.add("openable");
+      el.onclick = (e) => {
+        if (e.target.classList.contains("pick")) return;
+        edOpen(host.dataset.p);
+      };
+    }
+    for (const el of body.querySelectorAll("li.d > .ent")) {
+      const host = el.parentElement;
+      const path = host.dataset.p;
+      const tw = el.querySelector(".tw");
+      // 삼각형: 접고 펴기.
+      tw.onclick = (e) => {
+        e.stopPropagation();
+        host.classList.toggle("shut");
+        if (host.classList.contains("shut")) shutDirs.add(path); else shutDirs.delete(path);
+        tw.textContent = host.classList.contains("shut") ? "\u25b8" : "\u25be";
+      };
+      // 이름: 이 폴더를 고른다. 새로 만드는 것들이 여기로 들어간다.
+      el.onclick = (e) => {
+        if (e.target.classList.contains("pick")) return;
+        if (e.target === tw) return;
+        setCwd(onDisk(path));
+      };
+      el.title = "Click to work in this folder";
+    }
+    // 고른 폴더가 지워졌을 수도 있다. 없는 곳에 머물러 있으면 새로 만드는
+    // 것이 "no such folder" 로 거절되는데, 화면에는 그 폴더가 안 보이므로
+    // 이유를 알 수가 없다. 루트로 데려온다.
+    if (!folderExists(cwd)) cwd = "";
+    drawCrumb();
+    markHere();
+
+    // 내용이 줄었으면 그만큼만. 없는 자리로 보내면 브라우저가 알아서 자르지만
+    // 명시해 두는 편이 읽기 쉽다.
+    body.scrollTop = Math.min(wasAt, Math.max(0, body.scrollHeight - body.clientHeight));
+  }
+
+  $("files-refresh").addEventListener("click", askFiles);
+  // 트리가 오기 전에도 "/" 는 보여 준다. 읽기가 실패하면 빵가루가 아예
+  // 안 그려져, 어디에 만들려는지가 화면에서 사라진다.
+  drawCrumb();
+
+  // --- 글 편집기 --------------------------------------------------------
+  //
+  // 파일 이름을 누르면 오른쪽에서 열린다. 바이트를 글자로 바꾸는 일도, 도로
+  // 바이트로 바꾸는 일도 **서버가 한 코덱으로** 한다 - 브라우저는 Shift-JIS 를
+  // 읽을 수는 있어도 쓸 수는 없고, 읽기와 쓰기가 서로 다른 구현이면 아무도
+  // 안 건드린 파일이 아무도 못 읽는 파일이 된다.
+  //
+  // 편집할 수 있는 확장자만 연다. ROM 이나 MID 를 textarea 에 부어 놓고
+  // 저장하면 그 파일은 끝이다 - 열 수 있는 것과 열면 안 되는 것을 이름으로
+  // 가르는 것은 거칠지만, 거친 쪽으로 틀리는 편이 낫다.
+  const EDITABLE = new Set(["TXT","BAT","INI","DOC","ME","1ST","ASC","BAS","CFG",
+                            "LOG","LST","DAT","SST","INF","CSV","MD","C","H","S",
+                            "ASM","JSON","XML","HTM"]);
+  const extOf = (n) => { const i = n.lastIndexOf("."); return i < 0 ? "" : n.slice(i + 1).toUpperCase(); };
+  const canEdit = (n) => EDITABLE.has(extOf(n));
+
+  let edPath = null;          // 지금 열려 있는 이미지 안의 경로
+  let edWas = "";             // 불러온 그대로의 글 - 바뀌었는지 이걸로 안다
+  let edCharset = null;
+  let edFacts = null;      // 지금 연 파일의 바뀌지 않는 사실들
+  let edReadRetry = 0;     // 대여 중이라 못 읽었을 때 다시 물어볼 횟수
+
+  function edDirty() { return edPath !== null && $("ed-text").value !== edWas; }
+
+  // 파일의 **사실**은 고치는 동안 안 바뀐다 (줄바꿈, 코덱, EOF 바이트). 그건
+  // 늘 보이는 자리에 두고, "unsaved" 처럼 지나가는 소식은 옆에 따로 둔다.
+  // 한 자리에 섞으면 저장할 때마다 줄바꿈 표시가 사라졌다 나타난다.
+  function edSetInfo(r) {
+    if (!r) { $("ed-info").textContent = ""; return; }
+    edFacts = {
+      charset: r.charset,
+      crlf: r.crlf,
+      eof1a: r.eof1a,
+      bytes: r.bytes,
+    };
+    drawEdInfo();
+  }
+  function drawEdInfo() {
+    if (!edFacts) { $("ed-info").textContent = ""; return; }
+    const bits = [
+      edFacts.charset,
+      // 이게 물어보신 것. MSX 의 글은 CRLF 가 보통이고, LF 뿐인 파일은
+      // 그대로 LF 로 저장된다 - 바꾸지 않는다는 뜻으로도 읽힌다.
+      edFacts.crlf ? "CRLF" : "LF",
+    ];
+    if (edFacts.eof1a) bits.push("EOF 1A");
+    $("ed-info").title = edFacts.crlf
+      ? "Lines end with CR LF (0D 0A), the MSX convention. Saving keeps them."
+      : "Lines end with LF (0A) only. Saving keeps them that way rather than "
+        + "rewriting every line.";
+    $("ed-info").textContent = bits.join(" \u00b7 ");
+  }
+
+  function edSetNote() {
+    const n = $("ed-note");
+    if (!edPath) { n.textContent = ""; return; }
+    if (edDirty()) { n.className = "ed-note"; n.textContent = "unsaved"; return; }
+    n.className = "ed-note clean";
+    n.textContent = edFacts ? `${edFacts.bytes} B` : "";
+  }
+
+  function edClose() {
+    edPath = null; edWas = ""; edCharset = null; edFacts = null;
+    edSetInfo(null);
+    $("editor").classList.remove("show");
+    $("ed-text").value = "";
+    $("ed-save").disabled = true;
+    $("ed-name").textContent = "—";
+    edSetNote();
+  }
+
+  function edOpen(path) {
+    // 저장 안 한 것이 있으면 먼저 묻는다. 열려고 누른 것이 고친 것을 지워
+    // 버리면, 그건 누른 사람이 시킨 일이 아니다.
+    const go = () => {
+      edPath = path;
+      $("editor").classList.add("show");
+      $("ed-name").textContent = onDisk(path);
+      $("ed-text").value = "";
+      $("ed-text").disabled = true;
+      $("ed-save").disabled = true;
+      $("ed-note").className = "ed-note clean";
+      $("ed-note").textContent = "reading…";
+      edSetInfo(null);
+      edReadRetry = 8;
+      send2({ cmd: "file_read", path: onDisk(path),
+              charset: $("ed-cs").value || undefined });
+    };
+    if (edDirty()) {
+      askConfirm("Discard the changes?",
+                 [onDisk(edPath)],
+                 "What is in the editor has not been written to the image.",
+                 go, "Discard");
+      return;
+    }
+    go();
+  }
+
+  function edLoaded(r) {
+    $("ed-text").disabled = false;
+    $("ed-text").value = r.text;
+    // **textarea 를 거친 뒤의 값으로 기억한다.** textarea 의 value 는 CRLF 를
+    // LF 로 정규화한다 (HTML 규격의 "API value"). 서버가 준 글을 그대로
+    // 들고 있으면, CRLF 파일은 열자마자 "고쳐졌다" 로 보인다 - 실제로
+    // 그랬고, 닫을 때마다 "저장 안 했다" 가 떴다.
+    edWas = $("ed-text").value;
+    edCharset = r.charset;
+    edSetInfo(r);
+    $("ed-cs").value = EDITABLE_CS.has(r.charset) ? r.charset : "";
+    // **왕복이 정확하지 않으면 저장을 막는다.** 이 글을 도로 바이트로 바꿔도
+    // 원래와 같아진다는 보장이 없다는 뜻이고, 그러면 손대지 않은 절반까지
+    // 바뀐다. 보여는 주되 쓰지는 않는다.
+    if (r.exact === false) {
+      $("ed-text").readOnly = true;
+      $("ed-note").className = "ed-note";
+      // 바이너리는 이유가 따로 있다. "왕복이 안 된다" 는 코덱 이야기인데,
+      // 토큰화된 BASIC 은 코덱 문제가 아니라 **글이 아니라서** 막는 것이다.
+      $("ed-note").textContent = r.binary
+        ? `read-only — ${r.binary}`
+        : `read-only — ${r.charset} does not round-trip`;
+      $("ed-save").disabled = true;
+      return;
+    }
+    $("ed-text").readOnly = false;
+    $("ed-save").disabled = true;
+    edSetNote();
+  }
+  const EDITABLE_CS = new Set(["ascii", "shift_jis", "cp949", "latin-1"]);
+
+  $("ed-text").addEventListener("input", () => {
+    $("ed-save").disabled = !edDirty();
+    edSetNote();
+  });
+  $("ed-close").addEventListener("click", () => {
+    if (edDirty()) {
+      askConfirm("Discard the changes?", [onDisk(edPath)],
+                 "What is in the editor has not been written to the image.",
+                 edClose, "Discard");
+      return;
+    }
+    edClose();
+  });
+  $("ed-cs").addEventListener("change", () => { if (edPath) edOpen(edPath); });
+
+  function edSave() {
+    if (!edPath || !edDirty()) return;
+    $("ed-save").disabled = true;
+    $("ed-note").className = "ed-note clean";
+    $("ed-note").textContent = "saving…";
+    send2({ cmd: "file_write", path: onDisk(edPath),
+            charset: edCharset || undefined, text: $("ed-text").value });
+  }
+  $("ed-save").addEventListener("click", edSave);
+  // Ctrl/Cmd-S 는 브라우저의 "페이지 저장" 을 부르므로 가로챈다.
+  $("ed-text").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); edSave(); }
+  });
+
+  // --- 고르기와 지우기 -------------------------------------------------
+  //
+  // 고른 것은 **경로로** 들고 있다. 트리를 다시 그려도 살아남아야 하는데,
+  // MSX 가 쓸 때마다 다시 그려지기 때문이다. 다시 그린 뒤 사라진 항목은
+  // 고른 목록에서도 빠진다 - 없는 것을 지우자고 보내면 도구가 전부 거절한다.
+  /** 체크된 것 중 **내용이 있는** 폴더들. */
+  function pickedNonEmpty() {
+    return [...picked].filter((p) => {
+      const n = nodeAt(p);
+      return n && n.dir && (n.children || []).length > 0;
+    }).sort();
+  }
+
+  function drawPicked() {
+    const n = picked.size;
+    const full = pickedNonEmpty();
+
+    // **처음부터 막는다.** 누를 수 있게 두고 나중에 거절하는 것보다, 누를 수
+    // 없는 편이 낫다 - 되돌릴 수 없는 일을 확인까지 받아 놓고 실패하면 그
+    // 확인은 다음부터 읽히지 않는다. 왜 막혔는지도 옆에 적는다: 회색이 된
+    // 버튼만 보여 주고 이유를 안 말하면 고장으로 읽힌다.
+    $("files-del").disabled = n === 0 || full.length > 0;
+    $("files-del").title = full.length
+      ? `${full.map(onDisk).join(", ")} - not empty. Remove what is inside first.`
+      : "Remove the ticked entries from the image";
+
+    $("files-picked").textContent = full.length
+      ? `${full.length === 1 ? onDisk(full[0]) : `${full.length} folders`} not empty`
+      : (n ? `${n} ticked` : "");
+    $("files-picked").className = full.length ? "files-picked warn" : "files-picked";
+
+    // 이름 바꾸기는 하나에만 뜻이 있다. 여럿을 고른 채로 눌렀을 때 그중
+    // 아무거나 바꾸는 것보다, 누를 수 없는 편이 낫다. 내용이 있어도 이름은
+    // 바꿀 수 있다 - 잃는 것이 없다.
+    $("files-ren").disabled = n !== 1;
+  }
+
+  /** 트리에 아직 있는 것만 남긴다. */
+  function prunePicked(data) {
+    const alive = new Set();
+    (function w(list, p) {
+      for (const n of list) {
+        alive.add(p + "/" + n.name);
+        if (n.dir) w(n.children || [], p + "/" + n.name);
+      }
+    })(data.root, "");
+    for (const p of [...picked]) if (!alive.has(p)) picked.delete(p);
+  }
+
+  /** 이미지 안의 경로로. 앞의 "/" 를 떼면 도구가 쓰는 모양이 된다. */
+  const onDisk = (p) => p.replace(/^\//, "");
+
+  // 확인을 받고 나서만 지운다. 되돌릴 수 없는 일이라, 무엇이 사라지는지
+  // 이름을 들어 보여 준다 - 개수만 보여 주면 잘못 고른 것을 못 알아챈다.
+  let confirmGo = null;
+  /**
+   * 되돌릴 수 없는 일을 하기 전에 묻는다.
+   *
+   * `label` 이 있는 이유: 버튼에 **그 버튼이 하는 일**이 적혀 있어야 한다.
+   * 지우기 대화를 그대로 재사용했더니 "고친 것을 버리시겠습니까" 에
+   * `Delete` 가 붙어서, 파일을 지우는 것처럼 읽혔다.
+   */
+  // `kind` 는 확인 버튼의 성격이다. 기본은 지우기(빨강)지만, 인쇄는 지우는
+  // 일이 아니다 - 빨간 버튼은 "되돌릴 수 없다" 가 아니라 "없어진다" 로
+  // 읽힌다. 종이는 쓰이지만 있던 것이 사라지지는 않는다.
+  function askConfirm(title, lines, note, go, label = "Delete", kind = "danger") {
+    $("confirm-title").textContent = title;
+    $("confirm-list").textContent = lines.join("\n");
+    $("confirm-note").textContent = note || "";
+    $("confirm-yes").className = kind;
+    // `go` 가 없으면 **알리기만** 하는 것이다. 할 수 있는 일이 없는데 버튼을
+    // 남겨 두면, 눌러 보고 나서야 아무 일도 안 일어난다는 것을 알게 된다.
+    $("confirm-yes").hidden = !go;
+    $("confirm-yes").textContent = label || "Delete";
+    $("confirm-no").textContent = go ? "Cancel" : "OK";
+    confirmGo = go;
+    $("confirm").classList.add("show");
+  }
+  $("confirm-no").addEventListener("click", () => {
+    $("confirm").classList.remove("show"); confirmGo = null;
+  });
+  $("confirm-yes").addEventListener("click", () => {
+    const go = confirmGo;
+    $("confirm").classList.remove("show"); confirmGo = null;
+    if (go) go();
+  });
+  // Esc 로도 빠져나온다. 되돌릴 수 없는 일을 띄워 놓고 나갈 길이 버튼
+  // 하나뿐이면, 잘못 눌렀을 때 손이 급해진다.
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("confirm").classList.contains("show")) {
+      $("confirm").classList.remove("show"); confirmGo = null;
+    }
+  });
+
+  // --- 이름 바꾸기 ------------------------------------------------------
+  //
+  // 8.3 은 여기서도 확인하고 도구에서도 확인한다. 두 번 하는 이유는 서로
+  // 다른 일을 하기 때문이다: 여기서는 **치는 동안** 알려 주고 (다 치고
+  // 눌렀더니 거절당하는 것보다 낫다), 도구 쪽은 **진짜 관문**이다 - 화면을
+  // 거치지 않고 오는 요청도 있다.
+  const NAME_OK = /^[A-Za-z0-9$%'\-_@~`!(){}^#&]{1,8}(\.[A-Za-z0-9$%'\-_@~`!(){}^#&]{1,3})?$/;
+
+  let renamePath = null;
+  let promptMode = "rename";     // "rename" | "new" | "mkdir"
+  function checkName() {
+    const v = $("prompt-input").value.trim();
+    const ok = NAME_OK.test(v);
+    $("prompt-input").classList.toggle("bad", v.length > 0 && !ok);
+    $("prompt-yes").disabled = !ok;
+    return ok;
+  }
+  $("prompt-input").addEventListener("input", checkName);
+  $("prompt-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && checkName()) { e.preventDefault(); doRename(); }
+    if (e.key === "Escape") { e.preventDefault(); closePrompt(); }
+  });
+  function closePrompt() { $("prompt").classList.remove("show"); renamePath = null; }
+  $("prompt-no").addEventListener("click", closePrompt);
+  $("prompt-yes").addEventListener("click", () => doRename());
+
+  function doRename() {
+    const name = $("prompt-input").value.trim();
+    if (!NAME_OK.test(name)) return;
+    if (promptMode === "new" || promptMode === "mkdir") {
+      const into = tidyInto($("prompt-into").value);
+      const cmd = promptMode === "mkdir" ? "file_mkdir" : "file_new";
+      closePrompt();
+      // 친 곳으로 옮겨 간다. 방금 거기에 만들었으니 다음 것도 거기일 가능성이
+      // 높고, 안 옮기면 대화를 열 때마다 같은 경로를 다시 쳐야 한다.
+      setCwd(into);
+      pending(into ? `Creating in ${into}…` : "Creating…");
+      send2({ cmd, into, name });
+      return;
+    }
+    const was = renamePath;
+    if (!was) return;
+    closePrompt();
+    picked.delete(was);
+    drawPicked();
+    pending("Renaming…");
+    send2({ cmd: "files_mv", path: onDisk(was), name });
+  }
+
+  /**
+   * 새 글 파일.
+   *
+   * **어디에 생기는지를 누르기 전에 보여 준다.** 폴더 하나만 체크돼 있으면
+   * 그 안에, 아니면 루트에 만든다 - 떨어뜨리기 전에 목적지를 보여 주는
+   * 드롭과 같은 규칙이고, 128MB 안에서 엉뚱한 자리에 생긴 파일을 나중에
+   * 찾는 것은 쉽지 않다.
+   */
+  /** 이미지 안의 경로에 해당하는 트리 노드. 없으면 null. */
+  function nodeAt(path) {
+    if (!treeNow) return null;
+    return (function find(list, at) {
+      for (const n of list) {
+        const full = at + "/" + n.name;
+        if (full === path) return n;
+        if (n.dir) { const r = find(n.children || [], full); if (r) return r; }
+      }
+      return null;
+    })(treeNow.root, "");
+  }
+
+  /** 트리에 아직 있는 폴더인가. 사라진 폴더에 머물러 있으면 안 된다. */
+  function folderExists(p) {
+    if (!p) return true;                        // 루트는 늘 있다
+    if (!treeNow) return true;                  // 아직 모른다 - 섣불리 버리지 않는다
+    return (function find(list, at) {
+      for (const n of list) {
+        if (!n.dir) continue;
+        const full = onDisk(at + "/" + n.name);
+        if (full === p) return true;
+        if (find(n.children || [], at + "/" + n.name)) return true;
+      }
+      return false;
+    })(treeNow.root, "");
+  }
+
+  /** 고른 폴더를 바꾼다. 트리의 강조와 막대의 빵가루가 같이 움직인다. */
+  function setCwd(p) {
+    cwd = p || "";
+    drawCrumb();
+    markHere();
+  }
+
+  function markHere() {
+    const body = $("files-body");
+    for (const el of body.querySelectorAll("li.d.here")) el.classList.remove("here");
+    if (!cwd) return;
+    for (const el of body.querySelectorAll("li.d")) {
+      if (onDisk(el.dataset.p) === cwd) { el.classList.add("here"); break; }
+    }
+  }
+
+  /** `/ GAMES / KONAMI` - 각 조각을 눌러 그 폴더로 간다. */
+  function drawCrumb() {
+    const box = $("files-cwd");
+    box.replaceChildren();
+    const add = (label, target, title) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title || `Go to ${target || "the root"}`;
+      b.onclick = () => setCwd(target);
+      box.append(b);
+    };
+    add("/", "", "Go to the root of the image");
+    const parts = cwd ? cwd.split("/") : [];
+    let at = "";
+    for (const part of parts) {
+      at = at ? `${at}/${part}` : part;
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "/";
+      box.append(sep);
+      add(part, at);
+    }
+  }
+
+  /** 만들기 대화를 연다. `mode` 는 "new"(글 파일) 또는 "mkdir"(폴더). */
+  function openMakePrompt(mode) {
+    // **목적지는 트리에서 고른다.** 처음에는 대화에 폴더 목록을 넣었는데,
+    // 왼쪽에 폴더가 눈앞에 그려져 있는데 그 목록을 다시 훑게 하는 것은
+    // 같은 것을 두 번 보여 주는 일이다. 이제 왼쪽에서 고른 폴더가 곧
+    // 목적지이고, 대화는 그것을 **확인해 준다**.
+    promptMode = mode;
+    renamePath = null;
+    $("prompt-title").textContent =
+      mode === "mkdir" ? "New folder" : "New text file";
+    $("prompt-was").textContent = "";
+    // **고쳐 쓸 수 있다.** 트리에서 고른 폴더가 처음 값이지만, 고르지 않은
+    // 곳에도 만들 수 있어야 한다 - 스물 몇 개 폴더를 하나씩 눌러 찾아가는
+    // 것보다 경로를 치는 쪽이 빠를 때가 있다.
+    $("prompt-into-row").hidden = false;
+    $("prompt-into").value = cwd;
+    checkInto();
+    $("prompt-yes").textContent = "Create";
+    $("prompt-input").value = "";
+    $("prompt").classList.add("show");
+    checkName();
+    $("prompt-input").focus();
+  }
+
+  /** 친 경로를 이미지 안의 모양으로. `\GAMES\SUB/` -> `GAMES/SUB` */
+  function tidyInto(v) {
+    return String(v || "").replace(/\\/g, "/").split("/")
+      .map((x) => x.trim()).filter((x) => x && x !== ".").join("/");
+  }
+
+  /**
+   * 친 폴더가 있는지 보고 알려 준다.
+   *
+   * **막지는 않는다.** 아는 트리가 방금 읽은 것이 아닐 수 있고, 그러면 멀쩡한
+   * 폴더를 못 쓰게 막는 셈이 된다. 진짜 관문은 도구이고 그쪽 거절 사유는
+   * 그대로 보여 준다 - 여기서는 누르기 전에 한 번 말해 주는 것까지다.
+   */
+  function checkInto() {
+    const v = tidyInto($("prompt-into").value);
+    const note = $("prompt-into-note");
+    if (!v) { note.className = "modal-hint"; note.textContent = "the root of the image"; return; }
+    if (folderExists(v)) { note.className = "modal-hint"; note.textContent = v; return; }
+    note.className = "modal-hint warn";
+    note.textContent = `${v} - not in the list. Refresh if you just made it.`;
+  }
+  $("prompt-into").addEventListener("input", checkInto);
+  // 목적지에서 Enter 는 이름 칸으로 넘어간다. 거기서 또 Enter 면 만든다.
+  $("prompt-into").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("prompt-input").focus(); }
+    if (e.key === "Escape") { e.preventDefault(); closePrompt(); }
+  });
+  $("files-new").addEventListener("click", () => openMakePrompt("new"));
+  $("files-mkdir").addEventListener("click", () => openMakePrompt("mkdir"));
+
+  $("files-ren").addEventListener("click", () => {
+    if (picked.size !== 1) return;
+    renamePath = [...picked][0];
+    promptMode = "rename";
+    const leaf = renamePath.split("/").pop();
+    $("prompt-title").textContent = "New name";
+    $("prompt-yes").textContent = "Rename";
+    $("prompt-into-row").hidden = true;
+    $("prompt-into-note").textContent = "";
+    $("prompt-was").textContent = onDisk(renamePath);
+    $("prompt-input").value = leaf;
+    $("prompt").classList.add("show");
+    checkName();
+    $("prompt-input").focus();
+    // 확장자 앞까지만 고른다 - 보통 바꾸고 싶은 것은 그쪽이다.
+    const dot = leaf.lastIndexOf(".");
+    $("prompt-input").setSelectionRange(0, dot > 0 ? dot : leaf.length);
+  });
+
+  $("files-del").addEventListener("click", () => {
+    if (!picked.size) return;
+    const all = [...picked].sort();
+    const dirs = new Set();
+    (function w(list, p) {
+      for (const n of list) {
+        if (n.dir) { dirs.add(p + "/" + n.name); w(n.children || [], p + "/" + n.name); }
+      }
+    })(treeNow ? treeNow.root : [], "");
+
+    // **부모를 지우면 자식은 같이 간다.** 둘 다 보내면 도구가 "같은 것을 두 번"
+    // 이라고 거절하지는 않지만, 자식은 이미 없어진 뒤라 "디스크에 없다" 로
+    // 전부 거절된다. 자식 쪽을 먼저 걷어낸다.
+    const send = all.filter((p) => !all.some((q) => q !== p && p.startsWith(q + "/")));
+
+    // **내용이 있는 폴더는 지우지 않는다.** 한 이름에 백 개 파일이 딸려 가는
+    // 일이라, 도구도 `-r` 없이는 거절한다. 여기서 먼저 말해 주는 이유는,
+    // 되돌릴 수 없는 일을 확인까지 받아 놓고 실패하는 것이 확인의 뜻을
+    // 무너뜨리기 때문이다 - 다음부터 그 대화를 읽지 않게 된다.
+    const full = send.filter((p) => {
+      const n = nodeAt(p);
+      return n && n.dir && (n.children || []).length > 0;
+    });
+    if (full.length) {
+      askConfirm(
+        full.length === 1 ? "That folder is not empty" : "Those folders are not empty",
+        full.slice(0, 12).map(onDisk),
+        "Remove what is inside first. A folder is only removed here when it is"
+        + " empty, so one tick can never take a hundred files with it.",
+        null, null);
+      return;
+    }
+
+    const folders = send.filter((p) => dirs.has(p));
+    const shown = send.slice(0, 12).map(onDisk);
+    if (send.length > 12) shown.push(`...and ${send.length - 12} more`);
+
+    askConfirm(
+      `Remove ${send.length} ${send.length === 1 ? "entry" : "entries"} from the image?`,
+      shown,
+      folders.length
+        ? `${folders.length === 1 ? "One is an empty folder" : `${folders.length} are empty folders`}. This cannot be undone.`
+        : "This cannot be undone.",
+      () => {
+        send.forEach((p) => picked.delete(p));
+        drawPicked();
+        pending("Removing…");
+        send2({ cmd: "files_rm", paths: send.map(onDisk) });
+      });
+  });
+
+  // --- 드래그 앤 드롭 ---------------------------------------------------
+  //
+  // 떨어뜨린 곳이 목적지다: 폴더 줄 위면 그 폴더, 아니면 루트. 어디로 갈지는
+  // 떨어뜨리기 **전에** 보여 준다 - 128MB 디스크에서 엉뚱한 자리에 들어간
+  // 파일을 나중에 찾는 것은 쉽지 않다.
+  const dropBox = $("files-drop");
+  let dropInto = "";
+  let dragDepth = 0;
+
+  function markInto(el) {
+    for (const x of $("files-body").querySelectorAll("li.d.over")) x.classList.remove("over");
+    if (el) { el.classList.add("over"); dropInto = onDisk(el.dataset.p); }
+    else dropInto = cwd;              // 폴더를 안 짚었으면 고른 폴더로
+    $("files-dropto").textContent = dropInto
+      ? `into ${dropInto}` : "to the root of the image";
+  }
+
+  const filesPane = document.querySelector('section.pane[data-view="files"]');
+  filesPane.addEventListener("dragenter", (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    if (++dragDepth === 1) { dropBox.classList.add("show"); markInto(null); }
+  });
+  filesPane.addEventListener("dragover", (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    // 덮개가 위에 있으니 그 아래에서 무엇을 짚고 있는지 직접 찾는다.
+    dropBox.style.pointerEvents = "none";
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    markInto(under ? under.closest("li.d") : null);
+  });
+  filesPane.addEventListener("dragleave", () => {
+    if (--dragDepth <= 0) { dragDepth = 0; dropBox.classList.remove("show"); markInto(null); }
+  });
+  filesPane.addEventListener("drop", async (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    dragDepth = 0;
+    dropBox.classList.remove("show");
+    const into = dropInto;
+    markInto(null);
+    const list = [...e.dataTransfer.files];
+    if (!list.length) return;
+    await uploadFiles(list, into);
+  });
+
+  /** 파일을 하나씩 올려 모은 다음, 한 번에 이미지로 옮긴다. */
+  async function uploadFiles(list, into) {
+    pending(`Uploading ${list.length} file${list.length === 1 ? "" : "s"}…`);
+    let id;
+    try {
+      const r = await fetch("/files/open", { method: "POST" });
+      id = (await r.json()).id;
+    } catch (err) { pending(`Could not start the upload: ${err.message}`); return; }
+
+    for (const f of list) {
+      try {
+        const res = await fetch(`/files/stage?id=${encodeURIComponent(id)}`
+                              + `&name=${encodeURIComponent(f.name)}`,
+                                { method: "POST", body: f });
+        const j = await res.json().catch(() => ({ ok: false, why: `HTTP ${res.status}` }));
+        if (!j.ok) { pending(`${f.name}: ${j.why}`); return; }
+      } catch (err) { pending(`${f.name}: ${err.message}`); return; }
+    }
+    pending(into ? `Adding to ${into}…` : "Adding to the image…");
+    send2({ cmd: "files_put", id2: id, into });
+  }
+
+  /** 짧은 안내를 요약줄에 띄운다. 다음 트리가 오면 덮인다. */
+  function pending(text) { $("files-sum").textContent = text; }
+
+  /**
+   * 실패를 보여 준다. **요약줄이 아니다.**
+   *
+   * 실패하면 곧바로 트리를 다시 읽는데, 그 그리기가 요약줄을 덮어쓴다.
+   * 그래서 `pending()` 에 적은 오류는 깜빡이고 사라졌다 - 사용자가 왜
+   * 안 됐는지 알 길이 없었다. 이 줄은 아무것도 덮어쓰지 않고, 지울 때까지
+   * 또는 다음 성공까지 남는다.
+   */
+  function showErr(text) {
+    $("files-err-text").textContent = String(text || "That did not work.");
+    $("files-err").classList.add("show");
+  }
+  function clearErr() { $("files-err").classList.remove("show"); }
+  $("files-err-x").addEventListener("click", clearErr);
+
+  //: 이미지를 고치는 명령은 답이 올 때까지 시간이 걸리고, 답에 도구가 찍은
+  //: 글이 실려 온다. 그 글을 그대로 보여 준다 - 바꿔 쓰면 진짜 이유를 잃는다.
+  function send2(msg) {
+    // 새 일을 시작하면 지난 실패는 치운다. 남겨 두면 방금 한 일이 실패한
+    // 것처럼 읽힌다.
+    clearErr();
+    const id = ++editId;
+    editWaiting.set(id, msg.cmd);      // 답을 어떻게 다룰지는 명령이 정한다
+    send({ ...msg, id });
+  }
+
+  // ---------------------------------------------------------------- state
+  function rows(table, pairs) {
+    table.innerHTML = "";
+    for (const [k, v] of pairs) {
+      const tr = table.insertRow();
+      tr.insertCell().textContent = k;
+      tr.insertCell().textContent = v;
+    }
+  }
+
+  function draw(s) {
+    state = s;
+    const up = s.link.connected;
+    $("lamp").className = "dot " + (up ? "on" : "off");
+    $("linktext").textContent = up ? `connected · ${s.link.port}` : "no cartridge";
+    $("image").textContent = `${s.disk.path} · ${s.disk.blocks} blocks`
+                           + (s.disk.readonly ? " · read-only" : "");
+
+    rows($("facts-link"), [
+      ["link", up ? "connected" : "waiting"],
+      ["port", s.link.port || "—"],
+      ["serial", s.link.serial || "—"],
+    ]);
+    rows($("facts-disk"), [
+      ["image", s.disk.path],
+      ["blocks", `${s.disk.blocks} x 512B = ${(s.disk.blocks / 2048).toFixed(0)} MB`],
+      ["mode", s.disk.readonly ? "read-only" : "read-write"],
+      ["serving", s.disk.paused ? "paused" : "yes"],
+    ]);
+    // 카트리지가 MSX 를 실제로 보고 있는가. 프레임은 오는데 레지스터가 얼어
+    // 있으면 슬롯에 안 꽂혀 있거나 MSX 가 꺼진 것이다 - 소리가 안 난다는 말이
+    // 나왔을 때 제일 먼저 볼 곳인데, 여태 서버 로그를 뒤져야 알 수 있었다.
+    rows($("facts-psg"), [
+      ["frames", psgSeen ? `${psgSeen} seen` : "none yet"],
+      ["registers", psgFrozen === null ? "—"
+        : psgFrozen ? "unchanged - the MSX is off, or the cartridge is not in a slot"
+                    : "changing - the MSX is writing to the PSG"],
+      ["playing here", !playing ? "no"
+        : psgFrozen ? "muted - the registers stopped changing" : "yes"],
+    ]);
+    rows($("facts-print"), s.printer
+      ? [["mode", s.printer.mode], ["spool", s.printer.spool ? "on" : "off"],
+         ["job open", s.printer.open ? "yes" : "no"],
+         ["straight through", s.direct && s.direct.on
+           ? (s.direct.label || s.direct.target) : "off"]]
+      : [["printer", "not configured"]]);
+    drawPrinters(s);
+    rows($("facts-ask"), s.ask
+      ? [["state", s.ask.state], ["question", s.ask.question || "—"],
+         ["answer limit", `${s.ask.limit} bytes`]]
+      : [["ask", "not configured"]]);
+
+    if (s.midiProg !== undefined && document.activeElement !== $("prog"))
+      $("prog").value = String(s.midiProg);
+    // **스위치 하나가 둘을 뜻한다** - 카트리지가 레지스터를 보내는 것과, 이
+    // 화면이 그걸 소리로 만드는 것. 새로고침하면 서버는 앞의 것을 기억하는데
+    // 오디오는 처음부터 다시라 둘이 어긋난다. 서버 쪽만 보고 그리면 "켜져
+    // 있는데 소리가 안 나고, 누르면 오히려 꺼지는" 스위치가 된다.
+    //
+    // 그래서 **들리는가**를 그린다. 둘 다 참일 때만 켜진 것이다.
+    press($("sw-psg"), s.toggles.psg && playing);
+
+    // 새로고침하면 서버는 "PSG 켜짐" 을 기억하는데 오디오는 처음부터 다시다.
+    // 그대로 두면 소리가 끊긴 채로 남으므로 **이어 보기를 시도한다.**
+    //
+    // 브라우저는 사용자 동작 없이 오디오를 못 켜게 막지만, 그 사이트에서
+    // 전에 눌러 본 적이 있으면 허용해 준다 - 새로고침은 대개 그 경우다.
+    // 막히면 조용히 실패하고 안내만 남긴다. 한 번만 시도한다.
+    if (s.toggles.psg && !playing && !triedResume) {
+      triedResume = true;
+      audioOn()
+        .then(() => { if (state) draw(state); })
+        .catch(() => {
+          $("st-note").textContent = "the cartridge is sending - click to hear it here";
+        });
+    }
+    if (s.toggles.psg && !playing && triedResume)
+      $("st-note").textContent = $("st-note").textContent
+        || "the cartridge is sending - click to hear it here";
+    drawVoice(s);
+    press($("sw-midipac"), s.toggles.midipac);
+    press($("sw-pause"), s.toggles.pause);
+    for (const b of [$("sw-psg"), $("sw-midipac")]) {
+      b.disabled = !up;
+      b.title = up ? "" : "no cartridge - nothing to switch";
+    }
+    // 악기는 MIDI-PAC 의 것이다. 꺼져 있으면 바꿀 수 있어도 들을 데가 없으니,
+    // 바꿀 수 있는 것처럼 보이면 안 된다 - 눌렀는데 아무 소리도 안 나면
+    // 고장으로 읽힌다.
+    const canProg = up && s.toggles.midipac;
+    $("prog").disabled = !canProg;
+    $("progrow").style.opacity = canProg ? "1" : "0.45";
+    $("prog").title = canProg ? ""
+      : (up ? "turn MIDI-PAC on first" : "no cartridge");
+
+    const waiting = s.ask && s.ask.state === "asking";
+    $("askq").innerHTML = waiting
+      ? ""
+      : `<span class="none">Nothing is waiting for an answer.</span>`;
+    if (waiting) $("askq").textContent = `The MSX asks: ${s.ask.question}`;
+    for (const el of [$("askinput"), $("asksend"), $("askno")]) el.disabled = !waiting;
+
+    // 누가 답하나. 검색이면 사람이 칠 일이 없으니 칸을 흐려 두되 **잠그지는
+    // 않는다** - 검색이 엉뚱한 답을 가져왔을 때 사람이 끼어들 수 있어야 한다.
+    const mode = s.ask?.mode || "google";
+    $("ask-google").setAttribute("aria-pressed", String(mode === "google"));
+    $("ask-manual").setAttribute("aria-pressed", String(mode === "manual"));
+    $("ask-echo").setAttribute("aria-pressed", String(mode === "echo"));
+    const keyed = KEYED.find(([who]) => who === mode);
+    const kst = keyed ? s.ask?.[mode] : null;
+    $("ask-note").textContent = mode === "google" ? "a web search answers on its own"
+      : mode === "echo" ? "whatever the MSX sends comes straight back"
+      : keyed ? (kst?.key ? `${kst.model} answers on its own`
+                          : `${keyed[1]} needs an API key - enter it below`)
+      : "nothing is sent until you answer";
+
+    // 키 칸은 그쪽을 골랐거나 키가 들어 있을 때만 보인다. 키 자체는 서버가
+    // 돌려주지 않는다 - 스냅샷에는 있다/없다뿐이다.
+    for (const [who] of KEYED) {
+      const st = s.ask?.[who] || null;
+      $(`ask-${who}`).setAttribute("aria-pressed", String(mode === who));
+      $(`ask-${who}`).disabled = !st;
+      $(`${who}-row`).hidden = !st || (mode !== who && !st.key);
+      $(`${who}-forget`).disabled = !st?.key;
+      $(`${who}-note`).textContent = keyWaiting[who] ? "checking the key..."
+        : keyNote[who] || (st?.key ? "held in server memory only - gone when it stops"
+                                   : "never saved - enter it again after a restart");
+    }
+
+    // 답을 무엇으로 돌려줄까. **소리가 없는 서버에서는 소리 쪽을 잠근다** -
+    // 누를 수 있게 두면 눌러도 아무 일이 안 일어나고, 왜인지는 어디에도 없다.
+    const reply = s.ask?.reply || "text";
+    const canSay = !!(s.voice && s.voice.enabled);
+    for (const [id, m] of [["ask-rtext", "text"], ["ask-rvoice", "voice"], ["ask-rboth", "both"]]) {
+      $(id).setAttribute("aria-pressed", String(reply === m));
+      $(id).disabled = m !== "text" && !canSay;
+    }
+    $("ask-rnote").textContent = !canSay ? "voice is off - see the Voice pane"
+      : reply === "voice" ? "the MSX hears it, and sees nothing"
+      : reply === "both" ? "shown, then spoken"
+      : "";
+  }
+
+  // --- Voice ---------------------------------------------------------------
+  // The lists come from the server, not from here: which engines exist depends
+  // on what is installed on that machine, and a page that guesses shows
+  // choices that do nothing.
+  function fillOnce(sel, entries, current) {
+    // **길이가 아니라 내용으로 본다.** 언어를 바꾸면 목소리 수가 우연히 같을
+    // 수 있고, 그러면 한국어 목록이 영어 이름으로 남는다.
+    const sig = entries.map(([id]) => id).join("\u0000");
+    if (sel.dataset.filled !== sig) {
+      sel.innerHTML = "";
+      for (const [id, label] of entries) {
+        const o = document.createElement("option");
+        o.value = id;
+        o.textContent = label;
+        sel.appendChild(o);
+      }
+      sel.dataset.filled = sig;
+    }
+    // Never move a control the person is using. Typing into one field and
+    // having another jump under the cursor is how a settings page loses trust.
+    if (document.activeElement !== sel && current != null) sel.value = current;
+  }
+
+  function drawVoice(s) {
+    const v = s.voice;
+    const pane = document.querySelector('[data-view="voice"] .body');
+    if (!v) {
+      if (pane && !pane.dataset.off) {
+        pane.dataset.off = "1";
+        pane.innerHTML = '<h2>The MSX speaking</h2><p class="dim">' +
+          'This server was started without the voice service.</p>';
+      }
+      return;
+    }
+    press($("sw-voice"), v.enabled);
+    drawMonitor();
+    fillOnce($("v-engine"), Object.entries(v.engines || {}), v.engine || "auto");
+    $("v-engine-why").textContent = (v.engines || {})[$("v-engine").value] || "";
+    fillOnce($("v-deliver"),
+             (v.deliveryList || []).map((d) => [d.id, d.ok ? d.label : `${d.label} — ${d.why}`]),
+             v.deliver || "stream");
+    // **Say which one "auto" landed on.** A choice that resolves somewhere
+    // else without saying so is a choice the person did not make.
+    $("v-deliver-why").textContent =
+      v.delivering && v.delivering !== v.deliver ? `using ${v.delivering}` : "";
+
+    if (document.activeElement !== $("v-lang")) $("v-lang").value = v.lang || "en";
+
+    // The voice list is what this engine and language actually have, asked of
+    // the machine rather than guessed. "Whichever it picks" is first because
+    // the picked one is a deliberate choice - a low voice, which this channel
+    // carries better than a high one.
+    const list = [["", "Whichever it picks (a low one)"]]
+      .concat((v.voiceList || []).map((x) => [x.name, x.note ? `${x.name} — ${x.note}` : x.name]));
+    fillOnce($("v-name"), list, v.voice || "");
+    $("v-name-why").textContent = (v.voiceList || []).length
+      ? "" : "this engine does not list its voices";
+
+    $("v-state").textContent = v.speaking ? "speaking" : "idle";
+    // **measured, not assumed** - and say so, because a number the host merely
+    // guessed and one it watched the cartridge produce are worth different
+    // amounts to whoever is reading this.
+    $("v-rate").textContent = v.measured
+      ? `${v.measured} Hz measured` : `${v.rate} Hz assumed`;
+    $("v-sent").textContent = String(v.sent || 0);
+    $("v-played").textContent = String(v.played || 0);
+    $("v-note").textContent = v.lastError ? v.lastError
+                            : (v.starved ? "the host fell behind" : "");
+  }
+
+  const press = (b, on) => b.setAttribute("aria-pressed", String(!!on));
+
+  // ---------------------------------------------------------------- printer
+  //
+  // The server keeps every printed byte in a spool and hands over a list, not
+  // the bytes. A job can be hundreds of KB and the list only needs its size
+  // and what dialect it looks like - so the bytes travel once, when you open
+  // one.
+  let jobs = [];
+  let openJob = null;
+
+  function askJobs() { send({ cmd: "jobs" }); }
+
+  // --- 찍는 대로 바로 종이로 ---------------------------------------------
+  //
+  // **이 스위치는 종이를 쓴다.** 켜 두면 MSX 가 LPRINT 를 끝낼 때마다 그것이
+  // 그대로 나온다 - 시험 삼아 찍은 것까지. 그래서 기본은 꺼짐이고, 어디로
+  // 나가는지가 스위치 바로 옆에 적혀 있어야 한다.
+  //
+  // 목록을 화면이 들고 있지 않고 서버 스냅샷에서 받는 이유: 프린터는 설정
+  // 파일(--printers)로 늘어날 수 있어서, 여기 적어 두면 곧 어긋난다.
+  let printerList = [];
+  let directOn = false;
+  let directReady = false;
+  //: 고른 프린터의 이름. 드롭다운은 윗줄이고 보내기 버튼은 아랫줄이라,
+  //: 눈으로는 둘이 이어져 보이지 않는다 - "프린터 선택은 동일한 드롭박스
+  //: 쓰는 거야?" 가 그것이다. 버튼이 제 입으로 어디로 가는지 말하게 한다.
+  let directLabel = "";
+
+  function drawPrinters(s) {
+    const sel = $("direct-to");
+    const list = s.printers || [];
+    // 목록이 그대로면 다시 그리지 않는다. 고르던 중에 select 가 새로 그려지면
+    // 열려 있던 드롭다운이 닫힌다.
+    const key = list.map((p) => `${p.id} ${p.label}`).join("");
+    if (key !== printerList.key) {
+      sel.innerHTML = "";
+      for (const p of list) {
+        const o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = p.label;
+        sel.appendChild(o);
+      }
+      printerList = list;
+      printerList.key = key;
+    }
+    const d = s.direct;
+    directOn = !!(d && d.auto);
+    directReady = !!(d && d.ready);
+    directLabel = (d && d.label) || "";
+    $("direct-on").checked = directOn;
+    // **프린터 고르기는 늘 열려 있다.** 자동을 켜야만 고를 수 있게 했더니
+    // 한 장만 보내려는 사람이 고를 자리가 없었다.
+    sel.disabled = !list.length;
+    sel.title = directOn
+      ? "Every job goes here, and so do the ones you print by hand."
+      : "Where a job goes when you print it. Choosing one does not send anything by itself.";
+    $("direct-on").disabled = !list.length;
+    if (d && d.target && sel.value !== d.target) sel.value = d.target;
+    // **보이는 것과 서버가 아는 것을 맞춘다.** 드롭다운은 첫 항목을 스스로
+    // 고른 것처럼 보여 주는데 서버의 target 은 비어 있었다 - 화면에는 프린터
+    // 이름이 떠 있고 버튼은 회색인, 설명할 수 없는 상태였다. 고른 적이
+    // 없으면 보이는 그것을 한 번 알려 준다. 고르는 것은 보내는 것이 아니므로
+    // 종이는 나가지 않는다.
+    if (d && !d.target && list.length && sel.value) {
+      directReady = true;                        // 답이 오기 전에도 눌리게
+      send2({ cmd: "direct", to: sel.value });
+    }
+    // 방향은 영수증 프린터에서만 뜻이 있다 - 호스트 큐는 제 종이가 있다.
+    const rot = $("direct-rotate");
+    rot.disabled = !(d && d.canRotate);
+    if (d && d.rotate && rot.value !== d.rotate) rot.value = d.rotate;
+    drawDocPicked();
+
+    // **꺼져 있는 스위치는 그 자리에서 까닭을 말해야 한다.** 눌러도 아무 일이
+    // 없는 것과 못 쓰는 것은 화면에서 같아 보이는데, 실제로 그래서 "클릭
+    // 안됨" 이 나왔다 - 이유는 회색 글씨로 옆에 있었고 아무도 안 읽었다.
+    //
+    // **스풀은 더 이상 못 켜는 이유가 아니다.** 서버가 알아서 켠다 - 명령줄
+    // 옵션을 다시 붙이려고 서버를 내렸다 올리게 하는 스위치는 스위치가 아니다.
+    $("direct-on").disabled = !list.length;
+    if (!list.length) {
+      // 스냅샷에 direct 자리가 아예 없다 = 이 기능보다 먼저 뜬 서버다.
+      $("direct-note").textContent = d === undefined || d === null
+        ? "this server started before this switch existed — restart it"
+        : "no printers are configured";
+      $("direct-note").style.color = "var(--bad, #c66)";
+    } else if (d && d.unknown) {
+      $("direct-note").textContent = `'${d.target}' is gone from the list`;
+      $("direct-note").style.color = "var(--bad, #c66)";
+    } else {
+      $("direct-note").textContent = directOn ? "every job goes to paper" : "";
+      $("direct-note").style.color = "";
+    }
+
+    // 줄 서 있는 것과 실패한 것. 실패는 지워지지 않게 둔다 - 종이가 안 나온
+    // 까닭을 화면 어딘가에서는 읽을 수 있어야 한다.
+    const bits = [];
+    if (d && d.busy) bits.push("printing…");
+    if (d && d.queued) bits.push(`${d.queued} waiting`);
+    if (d && d.done) bits.push(`${d.done} sent`);
+    if (d && d.dropped) bits.push(`${d.dropped} dropped`);
+    if (d && d.failed) bits.push(`${d.failed} failed`);
+    const stat = $("direct-stat");
+    stat.textContent = bits.join(" · ");
+    stat.title = d && d.error ? d.error : "";
+    stat.style.color = d && d.failed ? "var(--bad, #c66)" : "";
+  }
+
+  function directSet() {
+    send2({ cmd: "direct", to: $("direct-to").value,
+            auto: $("direct-on").checked });
+  }
+  $("direct-on").addEventListener("change", directSet);
+  $("direct-to").addEventListener("change", directSet);
+
+  // 고른 작업을 **지금** 보낸다. 자동과는 다른 일이다.
+  //
+  // **묻고 나서 보낸다.** 종이는 되돌릴 수 없고, 이 버튼은 체크한 것을
+  // 한꺼번에 내보내므로 잘못 누르면 여러 장이 한 번에 나간다. 무엇이 어느
+  // 프린터로 가는지 보여 주고 나서 누르게 한다.
+  $("print-now").addEventListener("click", () => {
+    if (!docPicked.size || !directReady) return;
+    const seqs = [...docPicked].sort((a, b) => a - b);
+    const lines = seqs.map((seq) => {
+      const j = jobs.find((x) => x.seq === seq);
+      if (!j) return `job ${seq}`;
+      const kb = j.len < 1024 ? `${j.len} B` : `${(j.len / 1024).toFixed(1)} KB`;
+      return `job ${seq}   ${kb}   ${j.mode}`;
+    });
+    askConfirm(
+      `Print on ${directLabel}?`,
+      lines,
+      seqs.length > 1
+        ? "They go out merged, as one continuous print."
+        : "It goes straight to the printer.",
+      () => {
+        $("print-now").disabled = true;
+        send2({ cmd: "print_jobs", seqs });
+      },
+      seqs.length > 1 ? `Print ${seqs.length} jobs` : "Print",
+      "go");
+  });
+  $("direct-rotate").addEventListener("change", () => {
+    send2({ cmd: "direct", rotate: $("direct-rotate").value });
+  });
+
+  // --- 작업 여러 개를 문서 하나로 ---------------------------------------
+  //
+  // 고른 작업들을 서버가 PDF 한 벌로 묶는다. **바이트를 이어 붙이지 않는다** -
+  // ESC/P 는 줄 간격·피치·강조가 작업 경계를 넘어 살아남아서, 이어 붙이면
+  // 둘째가 첫째의 설정으로 그려진다. 파이썬 도구가 작업마다 깨끗한
+  // 인터프리터로 그린 뒤 **페이지를** 합친다.
+  const docPicked = new Set();     // 체크한 작업 번호
+  let docNow = null;               // 지금 만들어 둔 문서 { doc, pages, bytes, style }
+
+  function drawDocPicked() {
+    const n = docPicked.size;
+    $("doc-picked").textContent = n ? `${n} job${n === 1 ? "" : "s"} ticked` : "";
+    $("doc-make").disabled = n === 0;
+    const btn = $("print-now");
+    btn.disabled = n === 0 || !directReady;
+    // 이름은 고정이다. 고른 수에 따라 글자가 바뀌면 버튼이 옮겨 다니는 것처럼
+    // 보이고, 찾던 것을 못 찾는다.
+    btn.title = !directReady
+      ? "Choose a printer in the bar above first."
+      : n > 1 ? `Merge ${n} ticked jobs and print them on ${directLabel} now, as one continuous print.`
+      : n ? `Print the ticked job on ${directLabel} now.`
+          : `Tick the jobs to print on ${directLabel}.`;
+  }
+
+  function docMake() {
+    if (!docPicked.size) return;
+    $("doc-make").disabled = true;
+    $("doc-picked").textContent = "building…";
+    send2({ cmd: "doc_make", seqs: [...docPicked].sort((a, b) => a - b),
+            style: $("doc-style").value, stack: $("doc-stack").checked });
+  }
+  $("doc-make").addEventListener("click", docMake);
+  // 글꼴을 바꾸면 열려 있던 문서는 옛것이다. 다시 만든다.
+  $("doc-style").addEventListener("change", () => { if (docNow) docMake(); });
+  $("doc-stack").addEventListener("change", () => { if (docNow) docMake(); });
+
+  function docShow(m) {
+    docNow = m;
+    $("doc-info").textContent =
+      `${m.pages} page${m.pages === 1 ? "" : "s"} \u00b7 ${(m.bytes / 1024).toFixed(0)} KB`
+      + ` \u00b7 ${m.style === "host" ? "host font" : "MSX glyphs"}`
+      + (m.stack ? " \u00b7 stacked" : "")
+      + ` \u00b7 job${m.seqs.length === 1 ? "" : "s"} ${m.seqs.join(", ")}`;
+    $("doc-frame").src = `/print/doc?id=${encodeURIComponent(m.doc)}`;
+    $("docview").classList.add("show");
+    drawDocPicked();
+  }
+
+  function docClose() {
+    $("docview").classList.remove("show");
+    $("doc-frame").src = "about:blank";     // 안 비우면 숨은 PDF 가 메모리에 남는다
+    if (docNow) send2({ cmd: "doc_drop", doc: docNow.doc });
+    docNow = null;
+  }
+  $("doc-close").addEventListener("click", docClose);
+  $("doc-save").addEventListener("click", () => {
+    if (!docNow) return;
+    const a = document.createElement("a");
+    a.href = `/print/doc?id=${encodeURIComponent(docNow.doc)}&dl=1`;
+    a.download = "";
+    document.body.append(a); a.click(); a.remove();
+  });
+  // **여기서 인쇄하지 않는다.** 맥의 미리보기로 열어 주고, 프린터·부수·범위는
+  // 시스템 대화상자에서 사람이 정한다. 잘못 눌러 종이가 나가는 일이 없다.
+  //
+  // 그래서 버튼 이름도 "Print" 가 아니다. 눌러도 인쇄가 안 되는 Print 버튼은
+  // 두 번 누르게 만들고, 두 번째에 종이가 나간다.
+  $("doc-open").addEventListener("click", () => {
+    if (!docNow) return;
+    send2({ cmd: "doc_print", doc: docNow.doc });
+  });
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("docview").classList.contains("show")) docClose();
+  });
+
+  function drawJobs() {
+    const box = $("jobs");
+    if (!jobs.length) {
+      box.innerHTML = `<div class="none">Nothing has been printed yet.</div>`;
+      return;
+    }
+    const rows = jobs.map((j) => {
+      const when = new Date(j.t0 * 1000).toTimeString().slice(0, 8);
+      const kb = j.len < 1024 ? `${j.len} B` : `${(j.len / 1024).toFixed(1)} KB`;
+      const open = j.end === "unclosed" ? " (still printing)" : "";
+      return `<tr class="pick${openJob === j.seq ? " on" : ""}" data-seq="${j.seq}">`
+           + `<td><input type="checkbox" class="jpick"${docPicked.has(j.seq) ? " checked" : ""}`
+           + ` data-seq="${j.seq}"></td>`
+           + `<td class="num">${j.seq}</td><td class="num">${when}</td>`
+           + `<td class="num">${kb}</td><td>${j.mode}${open}</td>`
+           + `<td class="why">${j.why || ""}</td></tr>`;
+    }).join("");
+    box.innerHTML = `<table><thead><tr><th></th><th>#</th><th>at</th><th>size</th>`
+                  + `<th>looks like</th><th>why</th></tr></thead><tbody>${rows}</tbody></table>`;
+    for (const tr of box.querySelectorAll("tr.pick"))
+      tr.onclick = (e) => {
+        if (e.target.classList.contains("jpick")) return;   // 고르는 것은 여는 것이 아니다
+        openJobAt(Number(tr.dataset.seq));
+      };
+    for (const cb of box.querySelectorAll(".jpick"))
+      cb.onclick = (e) => {
+        e.stopPropagation();
+        const seq = Number(cb.dataset.seq);
+        if (cb.checked) docPicked.add(seq); else docPicked.delete(seq);
+        drawDocPicked();
+      };
+    drawDocPicked();
+  }
+
+  function openJobAt(seq) {
+    openJob = seq;
+    drawJobs();
+    const j = jobs.find((x) => x.seq === seq);
+    paperTools(j);
+    // 작업을 바꾸면 배율은 100% 부터. 앞 작업에 맞춰 둔 배율이 다음 작업에서
+    // 맞을 이유가 없고, 화면 밖으로 나간 그림은 안 그려진 것처럼 보인다.
+    zoom = 1;
+    // A raster job has no text to show - asking for a decode would print the
+    // escape codes as if they were words.
+    if (j && (j.mode === "raster" || j.mode === "msx-kanji" || j.mode === "msx-hangul")) {
+      $("paperinfo").textContent = `job ${seq} · drawing…`;
+      // With a kanji ROM the server can draw the glyphs the machine actually
+      // printed. Without one the browser's own font is the honest fallback -
+      // the shapes are close but they are not the printer's.
+      if (j.mode === "msx-kanji" && state?.printer?.kanjiRom)
+        send({ cmd: "jobglyphs", seq });
+      else
+        send({ cmd: "jobraw", seq });
+    } else {
+      send({ cmd: "job", seq, charset: $("cs").value || undefined });
+    }
+  }
+
+  // ESC/P is drawn here, not on the server. The server would need a PNG
+  // encoder, which is another dependency in a port whose whole point is not
+  // needing any - and the browser already knows how to put pixels on a screen.
+  //
+  // The renderer is the same file the Node tests check pixel-for-pixel against
+  // the Python one. Serving it from src/ rather than copying it into web/ is
+  // deliberate: two copies drift, and then the tested code is not the code
+  // that runs.
+  // Kanji and hangul carry no pixels at all - the MSX sent character codes and
+  // the printer's own ROM supplied the shapes. That ROM is not ours to ship,
+  // but a browser already has CJK fonts, so the codes are drawn with those.
+  // Period-accurate glyphs need the ROM; see --kanji-rom in the README.
+  let kanjiMod = null, hangulMod = null;
+
+  async function drawText(bytes, mode) {
+    let pages;
+    if (mode === "msx-kanji") {
+      if (!kanjiMod) kanjiMod = await import("/js/kanji.js");
+      pages = kanjiMod.extractText(bytes);
+    } else {
+      if (!hangulMod) hangulMod = await import("/js/hangul.js");
+      pages = hangulMod.decode(bytes);
+    }
+    const box = $("paper");
+    box.replaceChildren();
+    if (!pages.length) {
+      box.innerHTML = `<div class="hint">Nothing readable in this job.</div>`;
+      return 0;
+    }
+    pages.forEach((lines, i) => {
+      if (pages.length > 1) {
+        const label = document.createElement("div");
+        label.className = "pageno";
+        label.textContent = `page ${i + 1}`;
+        box.append(label);
+      }
+      const pre = document.createElement("pre");
+      pre.className = "cjk";
+      pre.textContent = lines.join("\n");
+      box.append(pre);
+    });
+    return pages.length;
+  }
+
+  // PSG 의 채널별 미터.
+  //
+  // **스펙트럼을 채널마다 그리지 않는 이유:** PSG 채널이 내는 것은 사각파
+  // 하나라 스펙트럼 모양이 늘 같다 - 배음이 홀수 차수로 줄줄이 설 뿐이다.
+  // 그 대신 레지스터에서 **정확한** 값이 나온다: 주파수, 음이름, 톤/노이즈가
+  // 켜졌는지, 볼륨이 고정인지 엔벨로프인지. 추정이 아니라 칩의 상태 그대로다.
+  //
+  // 레벨만은 워크렛이 잰 값을 쓴다 - 엔벨로프로 우는 채널은 레지스터의 볼륨
+  // 숫자가 0 이고, 실제 크기는 엔벨로프를 계산해야 나온다.
+  const PSG_CLOCK = 1789772.5;
+  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+  function noteOf(hz) {
+    if (!(hz > 16)) return "";
+    const n = Math.round(12 * Math.log2(hz / 440) + 69);
+    return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
+  }
+
+  function drawChannels(r, peak) {
+    const box = $("chans");
+    if (!box.childElementCount) {
+      box.innerHTML = ["A", "B", "C", "N"].map((w) =>
+        `<div class="chan" data-w="${w}"><span class="who">${w}</span>`
+        + `<span class="bar"><span class="fill"></span></span>`
+        + `<span class="hz"></span><span class="what"></span></div>`).join("");
+    }
+    const rows = box.children;
+    const mix = r[7];
+    for (let c = 0; c < 3; c++) {
+      const tp = r[2 * c] | ((r[2 * c + 1] & 0x0f) << 8);
+      const tOn = !((mix >> c) & 1);
+      const nOn = !((mix >> (3 + c)) & 1);
+      const amp = r[8 + c];
+      const env = (amp & 0x10) !== 0;
+      const hz = tp ? PSG_CLOCK / (16 * tp) : 0;
+      const row = rows[c];
+      const lvl = Math.min(1, (peak[c] || 0) / 0.5);
+      row.querySelector(".fill").style.width = `${(lvl * 100).toFixed(0)}%`;
+      row.querySelector(".hz").textContent =
+        (tOn && hz) ? `${hz < 1000 ? hz.toFixed(1) : hz.toFixed(0)} Hz` : "\u2014";
+      row.querySelector(".what").textContent =
+        (!tOn && !nOn) ? "off"
+          : [tOn ? (noteOf(hz) || "tone") : null, nOn ? "noise" : null,
+             env ? "env" : `vol ${amp & 0x0f}`].filter(Boolean).join(" \u00b7 ");
+      row.classList.toggle("off", !tOn && !nOn);
+    }
+    // 노이즈 발생기는 채널이 아니라 하나뿐이고, 위 셋이 섞어 쓴다.
+    const np = r[6] & 0x1f;
+    const anyNoise = [0, 1, 2].some((c) => !((mix >> (3 + c)) & 1));
+    const nrow = rows[3];
+    nrow.querySelector(".fill").style.width = anyNoise ? "100%" : "0%";
+    nrow.querySelector(".hz").textContent = np ? `${(PSG_CLOCK / (16 * np)).toFixed(0)} Hz` : "\u2014";
+    nrow.querySelector(".what").textContent = anyNoise
+      ? `period ${np} \u00b7 used by ${[0,1,2].filter(c=>!((mix>>(3+c))&1)).map(c=>"ABC"[c]).join("")}`
+      : "not mixed in";
+    nrow.classList.toggle("off", !anyNoise);
+  }
+
+  // ---------------------------------------------------------------- MIDI
+  //
+  // **이 흐름은 서버를 거치지 않는다.** 카트리지는 USB-MIDI 엔드포인트로 바로
+  // 내보내므로 Node 서버는 그 바이트를 아예 못 본다. 그래서 브라우저가 Web MIDI
+  // 로 직접 연다 - 같은 장치를 신디사이저와 나란히 읽는 것이라 소리를 뺏지
+  // 않는다.
+  //
+  // 여기 보이는 것은 MIDI-PAC(PSG 번역)과 MSX-MIDI(MSX 가 직접 보낸 것) **둘
+  // 다**다. 카트리지가 한 케이블로 내보내고, MSX-MIDI 가 흐르는 동안에는
+  // MIDI-PAC 이 입을 다물기 때문에 서로 섞이지 않는다.
+  //
+  // 처음 한 번 권한을 묻는다. 그래서 자동으로 켜지 않고 버튼을 둔다 - 화면을
+  // 열자마자 권한 창이 뜨면 무엇 때문인지 알 수 없다.
+  let midiStat = null, midiAccess = null, midiOn = false;
+
+  /**
+   * 모든 신디사이저에게 그만 울리라고 한다.
+   *
+   * CC 120 = all sound off (엔벨로프 무시하고 즉시), 123 = all notes off,
+   * 121 = 컨트롤러 리셋. 셋을 다 보내는 이유는 음원마다 지키는 것이 달라서다.
+   */
+  function hushAll(why) {
+    if (!midiAccess) return;
+    for (const out of midiAccess.outputs.values()) {
+      for (let ch = 0; ch < 16; ch++)
+        for (const cc of [120, 123, 121]) {
+          try { out.send([0xb0 | ch, cc, 0]); } catch { /* 방금 사라진 장치 */ }
+        }
+    }
+    note(`hushed the synths: ${why}`);
+  }
+
+  let midiAsking = false;
+  async function watchMidi() {
+    if (midiOn || midiAsking) return;
+    midiAsking = true;
+    // 권한 창이 뜨기까지 시간이 걸린다. 그동안 아무 반응이 없으면 또 누르게
+    // 되므로 **누르자마자** 버튼부터 바꾼다.
+    $("midiwatch").disabled = true;
+    $("midiwatch").textContent = "asking…";
+    $("midistate").textContent = "asking for permission…";
+    try {
+      const mod = await import("/js/midistat.js");
+      midiStat = new mod.MidiStat();
+      midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+    } catch (err) {
+      $("midistate").textContent = `cannot watch MIDI: ${err.message}`;
+      note(`web midi failed: ${err.message}`);
+      midiAsking = false;
+      $("midiwatch").disabled = false;   // 다시 해 볼 수 있게
+      $("midiwatch").textContent = "Watch the MIDI";
+      return;
+    }
+    const hook = () => {
+      let found = 0;
+      for (const input of midiAccess.inputs.values()) {
+        if (!/picodock/i.test(input.name || "")) continue;
+        found++;
+        input.onmidimessage = (e) => midiStat.feed(e.data, e.timeStamp || performance.now());
+      }
+      return found;
+    };
+    let had = hook();
+    const n = had;
+
+    // 카트리지가 나중에 꽂혀도 잡는다. CoreMIDI 의 목록은 그때 바뀐다.
+    //
+    // **사라질 때가 더 중요하다.** MSX 전원을 끄면 카트리지 자신이 리셋되면서
+    // USB 장치가 통째로 사라진다 - 펌웨어가 노트오프를 보낼 기회가 없다.
+    // 신디사이저는 "켜라" 만 듣고 "꺼라" 를 영영 못 들어서 음이 영원히 울린다.
+    // 실기에서 그렇게 됐다 (2026-09-21).
+    //
+    // 그걸 알아챌 수 있는 자리가 여기다. 장치가 없어지면 **우리가 대신**
+    // 끄라고 한다 - 모든 목적지의 16 채널에 all-sound-off / all-notes-off /
+    // 리셋 컨트롤러를 보낸다. 카트리지 자신에게도 가지만 그쪽은 MIDI 입력을
+    // 안 받으므로 해가 없다.
+    midiAccess.onstatechange = () => {
+      const now = hook();
+      if (had && !now) hushAll("the cartridge went away");
+      had = now;
+      if ($("midistate").dataset.base !== undefined)
+        $("midistate").dataset.base = now
+          ? `watching ${now} PicoDock input${now === 1 ? "" : "s"}`
+          : "the cartridge went away - silenced the synth";
+    };
+    midiOn = true;
+    midiAsking = false;
+    $("midiwatch").textContent = "watching";
+    $("midiwatch").disabled = true;
+    $("midistate").dataset.base = n
+      ? `watching ${n} PicoDock input${n === 1 ? "" : "s"}`
+      : "no PicoDock input yet - plug the cartridge in";
+    $("midistate").textContent = $("midistate").dataset.base;
+    note(`web midi watching ${n} input(s)`);
+    drawMidi();
+  }
+
+  // 88 건반은 과하다. MSX 음악이 실제로 쓰는 범위인 C1~C8 (MIDI 24~107) 만
+  // 그린다 - 좁은 폭에 더 많이 넣으면 한 건반이 1 px 이 되어 못 읽는다.
+  const KEY_LOW = 24, KEY_HIGH = 107;
+  const EQ_H = 26;            // .mrow .eq 의 높이와 같아야 한다
+  const IS_BLACK = [false, true, false, true, false, false, true, false, true, false, true, false];
+
+  function buildKeys(el) {
+    // 흰 건반만 폭을 나눠 갖고, 검은 건반은 그 사이에 얹는다 - 진짜 건반이
+    // 그렇게 생겼고, 그래야 옥타브가 눈에 들어온다.
+    let whites = 0;
+    for (let n = KEY_LOW; n <= KEY_HIGH; n++) if (!IS_BLACK[n % 12]) whites++;
+    const w = 100 / whites;
+    let wi = 0, html = "";
+    for (let n = KEY_LOW; n <= KEY_HIGH; n++) {
+      if (IS_BLACK[n % 12]) {
+        html += `<i class="b" data-n="${n}" style="left:${(wi * w - w * 0.3).toFixed(3)}%;`
+              + `width:${(w * 0.6).toFixed(3)}%"></i>`;
+      } else {
+        html += `<i class="w" data-n="${n}" style="left:${(wi * w).toFixed(3)}%;`
+              + `width:${w.toFixed(3)}%"></i>`;
+        wi++;
+      }
+    }
+    el.innerHTML = html;
+  }
+
+  function drawMidi() {
+    if (!midiOn) return;
+    requestAnimationFrame(drawMidi);
+    midiStat.tick(performance.now());
+    const box = $("midichans");
+    // 곡이 끝나면 목록을 지우지 않고 흐리게 둔다 - 방금 무엇이 울렸는지
+    // 보이는 편이 낫다. 비우는 것은 다음 곡의 첫 메시지가 올 때다.
+    box.style.opacity = midiStat.stale ? "0.45" : "1";
+    if ($("midistate").dataset.base)
+      $("midistate").textContent = midiStat.stale
+        ? $("midistate").dataset.base + " - idle"
+        : $("midistate").dataset.base;
+    const rows = midiStat.active();
+    if (!rows.length) {
+      if (box.dataset.empty !== "1") {
+        box.innerHTML = `<div class="mrow off"><span class="num">&mdash;</span>`
+          + `<span class="nm" style="grid-column:2/6">nothing has played yet</span></div>`;
+        box.dataset.empty = "1";
+      }
+      return;
+    }
+    box.dataset.empty = "0";
+    // 채널이 나타났다 사라지지 않게, 한 번 보인 채널은 자리를 지킨다.
+    for (const r of rows) {
+      let el = box.querySelector(`[data-ch="${r.ch}"]`);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "mrow";
+        el.dataset.ch = String(r.ch);
+        // 대역 막대는 **주파수 스펙트럼이 아니라 음높이**다. MIDI 에는 파형이
+        // 없으므로 오디오 스펙트럼은 나올 수 없고, 옥타브마다 실제로 울린 음을
+        // 세운 것이다 - 눈에는 이퀄라이저처럼 읽히고 값은 정확하다.
+        el.innerHTML = `<span class="num"></span><span class="icon"></span>`
+          + `<span class="eq">${r.bands.map(() => "<i></i>").join("")}</span>`
+          + `<span class="lvl"><i></i></span><span class="nm"></span>`;
+        // **제자리에 끼운다.** 그냥 뒤에 붙이면 나중에 처음 울린 채널이 맨
+        // 아래로 가서 1,2,4,5,10,3 처럼 보인다 - 채널 번호는 순서가 있는
+        // 값이고, 그 순서가 화면에서 깨지면 읽는 사람이 매번 훑어야 한다.
+        const after = [...box.children].find(
+          (x) => Number(x.dataset.ch) > r.ch);
+        box.insertBefore(el, after || null);
+        const kb = document.createElement("div");
+        kb.className = "keys";
+        kb.dataset.keysFor = String(r.ch);
+        buildKeys(kb);
+        box.insertBefore(kb, el.nextSibling);
+      }
+      el.querySelector(".num").textContent = r.ch + 1;
+      el.querySelector(".icon").textContent = r.icon;
+      el.querySelector(".lvl i").style.width = `${Math.min(100, r.level * 100).toFixed(0)}%`;
+      el.querySelector(".nm").textContent = r.name;
+      const bars = el.querySelectorAll(".eq i");
+      for (let b = 0; b < bars.length; b++)
+        bars[b].style.height =
+          `${Math.max(1, Math.min(EQ_H, r.bands[b] * EQ_H)).toFixed(1)}px`;
+      el.classList.toggle("off", !r.sounding && r.level < 0.02);
+
+      // 눌린 건반. 바뀐 것만 만진다 - 매 프레임 84 개를 다 칠하면 낭비다.
+      const kb = box.querySelector(`[data-keys-for="${r.ch}"]`);
+      if (kb) {
+        const want = new Set(r.down);
+        const prev = kb._down || new Set();
+        for (const n of prev) if (!want.has(n)) {
+          const k = kb.querySelector(`[data-n="${n}"]`); if (k) k.classList.remove("on");
+        }
+        for (const n of want) if (!prev.has(n)) {
+          const k = kb.querySelector(`[data-n="${n}"]`); if (k) k.classList.add("on");
+        }
+        kb._down = want;
+      }
+    }
+  }
+
+  $("midiwatch").onclick = watchMidi;
+
+  // 건반 보이기/감추기. **기본은 감추기** - 채널이 늘면 건반이 줄줄이 붙어
+  // 이퀄라이저와 악기 이름이 밀려난다. 필요할 때 켜는 편이 낫다.
+  //
+  // 고른 값은 기억하되, 못 읽어도(사이트 데이터가 막혀 있으면) 기본값으로
+  // 간다. 읽기도 반드시 try 안에 둔다.
+  let keysOn = false;
+  try { keysOn = localStorage.getItem("pd.keys") === "1"; } catch { /* 막혀 있다 */ }
+
+  function applyKeys() {
+    $("midichans").classList.toggle("nokeys", !keysOn);
+    $("midikeys").setAttribute("aria-pressed", String(keysOn));
+  }
+  $("midikeys").onclick = () => {
+    keysOn = !keysOn;
+    try { localStorage.setItem("pd.keys", keysOn ? "1" : "0"); } catch { /* 막혀 있다 */ }
+    applyKeys();
+  };
+  applyKeys();
+
+  let triedResume = false;      // 새로고침 뒤 이어 보기를 한 번만 시도한다
+  let escpMod = null;
+  /** 한 장을 canvas 로. {width, height, bits} 를 받는다 (1 = 검정). */
+  function paintPage(box, label, c) {
+    const tag = document.createElement("div");
+    tag.className = "pageno";
+    tag.textContent = label;
+    const cv = document.createElement("canvas");
+    cv.width = c.width; cv.height = c.height;
+    const g = cv.getContext("2d");
+    const img = g.createImageData(c.width, c.height);
+    for (let k = 0; k < c.bits.length; k++) {
+      const v = c.bits[k] ? 0 : 255;
+      img.data[k * 4] = img.data[k * 4 + 1] = img.data[k * 4 + 2] = v;
+      img.data[k * 4 + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    box.append(tag, cv);
+  }
+
+  async function drawRaster(bytes, charset) {
+    if (!escpMod) escpMod = await import("/js/escp.js");
+    const box = $("paper");
+
+    // **msx-picoprinter 에 보내는 작업은 ESC/P 가 아니다.** 203 dpi 헤드에
+    // 1:1 로 놓이는 것을 전제로 쓰였고, 그렇게 그려야 영수증에 나가는 것과
+    // 같은 그림이 된다. ESC/P 로 읽으면 ESC A 3 이 밴드를 12.5 px 씩 겹쳐
+    // 9 분의 1 높이로 눌린다 - 그래서 이 미리보기만 눌려 보였다.
+    if (escpMod.hasPicoprinterMark(bytes)) {
+      const got = escpMod.nativeBitmap(bytes);
+      if (got) {
+        const bits = new Uint8Array(got.rowBytes * 8 * got.rows);
+        for (let y = 0; y < got.rows; y++)
+          for (let x = 0; x < got.rowBytes * 8; x++)
+            bits[y * got.rowBytes * 8 + x] =
+              (got.data[y * got.rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1;
+        box.replaceChildren();
+        paintPage(box, `${got.rowBytes * 8} x ${got.rows} — as the printer lays it`,
+                  { width: got.rowBytes * 8, height: got.rows, bits });
+        return 1;
+      }
+    }
+
+    const pages = escpMod.render(bytes, { charset: charset || undefined });
+    box.replaceChildren();
+    let drawn = 0;
+    pages.forEach((p, i) => {
+      if (p.empty) return;
+      const c = p.crop();
+      paintPage(box, `page ${i + 1} — ${c.width} x ${c.height}`, c);
+      drawn++;
+    });
+    if (!drawn) box.innerHTML = `<div class="hint">Nothing was printed on the page.</div>`;
+    return pages.length;
+  }
+
+  function showJob(j) {
+    // textContent, never innerHTML: these bytes came off an MSX and may be
+    // anything at all. A print job is not trusted markup.
+    const pre = document.createElement("pre");
+    pre.textContent = sanitize(j.text);
+    $("paper").replaceChildren(pre);
+    paperTools(j);
+    $("paperinfo").textContent =
+      `job ${j.seq} · ${j.bytes} bytes · ${j.mode} · read as ${j.charset}`
+      + (j.truncated ? " · truncated for display" : "");
+  }
+
+  // Keep tab and newline; everything else below 0x20 would move the cursor or
+  // repaint the page if it reached a terminal, and reads as noise here.
+  /**
+   * 프린터 바이트를 **화면에 보일 글**로. 서버의 printer_text.js 에도 같은
+   * 이름이 있지만 **하는 일이 다르다**: 저쪽은 바이트의 뜻을 지켜야 해서 CR 을
+   * 그대로 두고, 이쪽은 `<pre>` 에 넣을 것이라 줄바꿈으로 바꾼다.
+   *
+   * **MSX 의 줄 끝은 CRLF 다.** CR 을 제어문자로 쳐서 점으로 바꾸면 모든 줄
+   * 끝에 `·` 가 붙는다 - "hello msx·" 가 그것이었다. 먼저 줄바꿈을 정규화하고,
+   * 그러고도 남은 제어문자만 점으로 바꾼다.
+   */
+  function sanitize(text) {
+    let out = "";
+    for (const ch of text.replace(/\r\n?/g, "\n")) {
+      const c = ch.codePointAt(0);
+      out += (ch === "\t" || ch === "\n" || (c >= 32 && c !== 127)) ? ch : "\u00b7";
+    }
+    return out;
+  }
+
+  $("cs").onchange = () => { if (openJob !== null) openJobAt(openJob); };
+
+  // --- 종이 위의 조작 ---------------------------------------------------
+  //
+  // 작업 종류에 따라 쓸 수 있는 것이 다르다. 래스터에는 문자셋이 뜻이 없고
+  // (글자가 아니라 점이다), 글자 작업에는 배율이 뜻이 없다 (브라우저가
+  // 이미 접어 준다). 쓸 수 없는 조작을 흐리게 두느니 **아예 감춘다** -
+  // 눌러도 아무 일 없는 버튼은 고장으로 읽힌다.
+  const RASTER = new Set(["raster", "msx-kanji", "msx-hangul"]);
+
+  function paperTools(j) {
+    const raster = !!j && RASTER.has(j.mode);
+    $("pb-zoom").hidden = !raster;
+    $("pb-cs").hidden = !j || raster;
+    $("pb-save").hidden = !j;
+    // 픽셀이 없는 작업은 png 로 내보낼 것이 없다.
+    $("save-png").hidden = !raster;
+    $("save-txt").hidden = raster;
+  }
+
+  let zoom = 1;
+  function applyZoom() {
+    $("zoom-now").textContent = `${Math.round(zoom * 100)}%`;
+    for (const c of $("paper").querySelectorAll("canvas")) {
+      c.style.transform = zoom === 1 ? "" : `scale(${zoom})`;
+      // scale 은 자리를 안 차지한다. 늘린 만큼 아래를 밀어 내지 않으면
+      // 페이지가 서로 겹쳐 찍힌다.
+      c.style.marginBottom = `${14 + (zoom > 1 ? c.height * (zoom - 1) : 0)}px`;
+    }
+  }
+  const STEPS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
+  $("zoom-in").onclick = () => {
+    zoom = STEPS.find((z) => z > zoom + 0.001) ?? STEPS[STEPS.length - 1];
+    applyZoom();
+  };
+  $("zoom-out").onclick = () => {
+    zoom = [...STEPS].reverse().find((z) => z < zoom - 0.001) ?? STEPS[0];
+    applyZoom();
+  };
+  $("zoom-fit").onclick = () => {
+    const c = $("paper").querySelector("canvas");
+    if (!c) return;
+    // 판 너비에 맞춘다. 좌우 여백 32px 은 .paper 의 padding 과 같다.
+    zoom = Math.max(0.1, ($("paper").clientWidth - 32) / c.width);
+    applyZoom();
+  };
+
+  /** 내려받기. 서버가 파일을 만들어 주므로 여기서는 링크만 연다. */
+  function saveJob(kind) {
+    if (openJob === null) return;
+    const cs = $("cs").value;
+    const q = `seq=${openJob}&as=${kind}`
+            + (kind === "txt" && cs ? `&charset=${encodeURIComponent(cs)}` : "");
+    const a = document.createElement("a");
+    a.href = `/print/job?${q}`;
+    a.download = "";            // 서버의 content-disposition 이 이름을 정한다
+    document.body.append(a);
+    a.click();
+    a.remove();
+  }
+  $("save-prn").onclick = () => saveJob("prn");
+  $("save-txt").onclick = () => saveJob("txt");
+
+  // png 는 서버가 만들 수 없다 - 그림은 **여기서** 그려진다 (ESC/P 해석이
+  // 브라우저에 있다). 그려 놓은 캔버스를 그대로 내보낸다.
+  $("save-png").onclick = () => {
+    const pages = [...$("paper").querySelectorAll("canvas")];
+    if (!pages.length) return;
+    pages.forEach((c, i) => {
+      c.toBlob((blob) => {
+        if (!blob) return;
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = pages.length > 1
+          ? `msx_print_${openJob}_p${i + 1}.png` : `msx_print_${openJob}.png`;
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      }, "image/png");
+    });
+  };
+
+  // ---------------------------------------------------------------- audio
+  //
+  // The registers arrive here and become sound here. The worklet does the
+  // chip; this part only carries frames to it and draws what came out.
+  //
+  // An AudioContext cannot start without a gesture, which is why turning the
+  // switch on is what creates it rather than the page doing it on load. That
+  // rule exists so pages cannot make noise at you unbidden, and it happens to
+  // fit: the switch is the moment you asked to hear something.
+  const PSG_FRAME = 0x50;
+  const PRINT_DATA = 0x40;
+  let ac = null, psg = null, gain = null, analyser = null, spectrum = null;
+  let playing = false;
+
+  async function audioOn() {
+    if (ac) { await ac.resume(); playing = true; return; }
+    ac = new AudioContext({ latencyHint: "interactive" });
+    await ac.audioWorklet.addModule("psg-worklet.js");
+    psg = new AudioWorkletNode(ac, "psg", { outputChannelCount: [1] });
+    gain = ac.createGain();
+    gain.gain.value = Number($("vol").value) / 100;
+    analyser = ac.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.72;   // bars that twitch are unreadable
+    psg.connect(gain).connect(analyser).connect(ac.destination);
+
+    psg.port.onmessage = (e) => {
+      const m = e.data;
+      if (m.ev === "stats") {
+        $("st-q").textContent = `${m.queued} frames`;
+        $("st-f").textContent = m.frames;
+        $("st-u").textContent = m.underruns;
+        if (m.regs) drawChannels(m.regs, m.peak || [0, 0, 0]);
+      } else if (m.ev === "overrun") {
+        $("st-note").textContent = "fell behind — skipped ahead";
+        setTimeout(() => ($("st-note").textContent = ""), 3000);
+      }
+    };
+    await ac.resume();
+    playing = true;
+    drawSpectrum();
+    if (state) draw(state);      // 스위치가 곧바로 켜진 것으로 보이게
+    // 서버에 알린다. 화면 안에서만 알고 있으면, "소리가 안 난다" 일 때 스위치를
+    // 눌렀는지 · 오디오가 떴는지 · 프레임이 오는지를 하나도 못 가린다.
+    note(`audio started (${ac.sampleRate} Hz, state ${ac.state})`);
+  }
+
+  async function audioOff() {
+    playing = false;
+    triedResume = true;          // 일부러 껐다 - 다음 상태에서 다시 켜지 않는다
+    if (state) draw(state);
+    if (psg) psg.port.postMessage({ cmd: "reset" });
+    if (ac) await ac.suspend();
+    $("st-q").textContent = "—";
+  }
+
+  // ---------------------------------------------------------------- monitor
+  //
+  // What the MSX is saying, played here as well. The server sends it the moment
+  // the cartridge reports the first sample taken, as 16-bit PCM at the rate the
+  // host synthesised for.
+  //
+  // **Its own AudioContext.** The PSG one is made by the Sound switch and
+  // carries a worklet; sharing it would mean the monitor only works once PSG
+  // raw has been turned on, which is not a thing anyone would guess.
+  const VOICE_MONITOR = 0x56, VOICE_MONITOR_STOP = 0x57;
+  let mac = null, mgain = null, msrc = null;
+  let monitorOn = false;
+  try { monitorOn = localStorage.getItem("pd.monitor") === "1"; } catch { /* 막혀 있다 */ }
+
+  //: PSG 원음을 입 다물게 할 시각(ac 시계가 아니라 performance.now). 말하는
+  //: 동안 두두둑이 겹치지 않게 - 모니터를 켰든 안 켰든.
+  let hushUntil = 0, hushTimer = null;
+
+  function psgGainApply() {
+    if (!gain) return;
+    const hushed = psgFrozen || performance.now() < hushUntil;
+    const target = hushed ? 0 : Number($("vol").value) / 100;
+    gain.gain.setTargetAtTime(target, ac.currentTime, 0.03);
+  }
+
+  function hushPsg(ms) {
+    hushUntil = performance.now() + ms;
+    psgGainApply();
+    clearTimeout(hushTimer);
+    // 끝나면 풀어 준다. 조금 넉넉히 - MSX 는 브라우저보다 조금 늦게 끝난다.
+    hushTimer = setTimeout(() => { hushUntil = 0; psgGainApply(); }, ms + 150);
+  }
+
+  async function monitorStart(buf) {
+    const dv = new DataView(buf);
+    const rate = dv.getUint32(1, true);
+    const pcm = new Int16Array(buf.slice(5));
+    if (!rate || !pcm.length) return;
+    hushPsg(pcm.length / rate * 1000);
+    if (!monitorOn) return;
+    try {
+      if (!mac) {
+        mac = new AudioContext();
+        mgain = mac.createGain();
+        mgain.gain.value = Number($("vol").value) / 100;
+        mgain.connect(mac.destination);
+      }
+      if (mac.state !== "running") await mac.resume();
+      // AudioBuffer 는 3 kHz 에서 768 kHz 까지 받는다 - 10 kHz 남짓은 그대로 싣고
+      // 재생할 때 브라우저가 올려 잡는다. 우리가 미리 올리면 우리 필터가 한 번
+      // 더 끼어든다.
+      const ab = mac.createBuffer(1, pcm.length, rate);
+      const ch = ab.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      if (msrc) { try { msrc.stop(); } catch { /* 이미 끝났다 */ } }
+      msrc = mac.createBufferSource();
+      msrc.buffer = ab;
+      msrc.connect(mgain);
+      msrc.start();
+    } catch (e) {
+      note(`monitor failed: ${e.message || e}`);
+    }
+  }
+
+  function monitorStop() {
+    if (msrc) { try { msrc.stop(); } catch { /* 이미 끝났다 */ } msrc = null; }
+    hushUntil = 0;
+    psgGainApply();
+  }
+
+  function drawMonitor() { press($("sw-monitor"), monitorOn); }
+
+  let psgSeen = 0;
+  let psgFrozen = null;        // null = 아직 모름
+  let psgLastRegs = null, psgSame = 0;
+  function onPsgFrame(bytes) {
+    psgSeen++;
+    // 레지스터가 바뀌는지 본다. 50 틱(1 초)을 같은 값으로 지나가면 얼어 있다.
+    const key = bytes.subarray(1, 15).join(",");
+    const was = psgFrozen;
+    if (key === psgLastRegs) { if (++psgSame > 50) psgFrozen = true; }
+    else { psgLastRegs = key; psgSame = 0; psgFrozen = false; }
+
+    // **얼었으면 입을 다문다.** MSX 를 꺼도 카트리지는 마지막 레지스터를
+    // 계속 실어 보내므로, 그대로 합성하면 울리던 음이 영원히 남는다.
+    // 펌웨어가 MIDI-PAC 에 대해 하는 것과 같은 일을, 여기서는 원음에 대해
+    // 한다 - 스트림은 충실한 거울로 두고, 소리를 낼지는 합성하는 쪽이 정한다.
+    //
+    // 1 초(50 틱)를 기준으로 삼는다. MSX 음악 드라이버는 프레임마다 레지스터를
+    // 쓰므로, 1 초가 지나도 한 글자도 안 바뀌었으면 그 기계는 멈춘 것이다.
+    if (gain && psgFrozen !== was) psgGainApply();
+    if (!playing || !psg) return;
+    // slice(), not subarray(): postMessage would otherwise copy the whole
+    // receive buffer behind the view, fifty times a second.
+    // 레지스터 14 개 **와 플래그**. 플래그의 bit0 은 "이 틱에 R13 을 다시
+    // 썼다" 로, 값이 같아도 엔벨로프가 처음부터 다시 도는 것을 알려 준다.
+    // 이걸 빼먹으면 볼륨을 엔벨로프로만 내는 곡이 한 번 감쇠하고 영영
+    // 조용해진다 - 노이즈 효과음만 남는다 (2026-09-21 실기).
+    psg.port.postMessage({ cmd: "frame", regs: bytes.slice(1, 15), flags: bytes[15] });
+  }
+
+  // The spectrum is not decoration. It is the fastest way to tell "the server
+  // is sending nothing" from "the synthesiser is producing nothing" - two
+  // failures that look identical when all you have is silence.
+  // 이름이 `draw` 가 아닌 이유: 상태를 그리는 draw(s) 가 따로 있다. 둘 다
+  // `function draw` 였을 때 나중 것이 앞 것을 조용히 덮어써서, 상태 메시지가
+  // 올 때마다 스펙트럼 함수가 불렸다. 오디오가 꺼져 있으면 거기서 터지고,
+  // 화면은 영영 "connecting" 에 멈춘 채 아무것도 안 먹었다 (2026-09-21).
+  //
+  // 자바스크립트는 이걸 오류로 알려 주지 않는다 - 스크립트 최상위에서는
+  // 같은 이름의 function 선언이 겹쳐도 그냥 마지막이 이긴다.
+  function drawSpectrum() {
+    const cv = $("spectrum");
+    if (!spectrum) spectrum = cv.getContext("2d");
+    const g = spectrum;
+    const bins = new Uint8Array(analyser.frequencyBinCount);
+
+    const tick = () => {
+      if (!playing) { g.clearRect(0, 0, cv.width, cv.height); return; }
+      requestAnimationFrame(tick);
+      analyser.getByteFrequencyData(bins);
+      const css = getComputedStyle(document.body);
+      g.clearRect(0, 0, cv.width, cv.height);
+      // The PSG lives below about 8 kHz, so showing the whole range wastes
+      // most of the width on nothing.
+      const shown = Math.floor(bins.length * 8000 / (ac.sampleRate / 2));
+      const n = 64;
+      const w = cv.width / n;
+      for (let i = 0; i < n; i++) {
+        // Logarithmic bins: octaves matter to music, linear bins do not.
+        const lo = Math.floor(shown * (Math.pow(shown, i / n) - 1) / (shown - 1));
+        const hi = Math.max(lo + 1, Math.floor(shown * (Math.pow(shown, (i + 1) / n) - 1) / (shown - 1)));
+        let peak = 0;
+        for (let k = lo; k < hi && k < bins.length; k++) peak = Math.max(peak, bins[k]);
+        const h = (peak / 255) * cv.height;
+        g.fillStyle = peak > 220 ? css.getPropertyValue("--warn")
+                    : peak > 120 ? css.getPropertyValue("--ok")
+                    : css.getPropertyValue("--accent");
+        g.globalAlpha = 0.85;
+        g.fillRect(i * w + 1, cv.height - h, w - 2, h);
+      }
+    };
+    tick();
+  }
+
+  // The cartridge re-asserts the instrument every two seconds, so it also
+  // holds whatever is picked here - nothing else can quietly overwrite it.
+  // That same loop is why an instrument cannot be auditioned by sending a
+  // program change from elsewhere: it is put back within two seconds.
+  $("prog").onchange = (e) => {
+    send({ cmd: "set", what: "midiprog", value: Number(e.target.value) });
+    $("prognote").textContent = "sent";
+    setTimeout(() => ($("prognote").textContent = ""), 1500);
+  };
+
+  $("vol").oninput = (e) => {
+    $("volnum").textContent = `${e.target.value}%`;
+    // 얼어 있는 동안에는 0 을 지킨다 - 안 그러면 볼륨을 만지는 것만으로
+    // 멈춘 기계의 마지막 음이 되살아난다. 말하는 동안도 마찬가지다.
+    psgGainApply();
+    if (mgain) mgain.gain.value = Number(e.target.value) / 100;
+  };
+
+  // ---------------------------------------------------------------- socket
+  let ws = null, backoff = 250;
+
+  // A dropped socket used to make this silently do nothing, which looks
+  // exactly like a broken button. Say so instead - the server is restarted
+  // often enough (a new firmware, a new image) that this is a normal state,
+  // and "nothing happened" is the one response that teaches you nothing.
+  /** 서버 로그에 한 줄 남긴다. 화면에서만 아는 것을 밖에서도 보게. */
+  function note(text) { send({ cmd: "note", text: String(text).slice(0, 200) }); }
+
+  function send(msg) {
+    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(msg)); return true; }
+    $("gone").textContent = "Not connected to the server - the click did nothing.";
+    $("gone").classList.add("show");
+    return false;
+  }
+
+  function open() {
+    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      backoff = 250;
+      $("gone").classList.remove("show");
+      $("gone").textContent = "Lost the server. Retrying…";
+      askJobs();
+      if (current === "files") askFiles();
+    };
+    ws.onmessage = (e) => {
+      // Binary is the PSG stream: fifty frames a second, which as JSON would
+      // be a hundred bytes and a parse each time instead of eighteen bytes.
+      if (e.data instanceof ArrayBuffer) {
+        const b = new Uint8Array(e.data);
+        if (b[0] === PSG_FRAME) { onPsgFrame(b); return; }
+        if (b[0] === VOICE_MONITOR) { monitorStart(e.data); return; }
+        if (b[0] === VOICE_MONITOR_STOP) { monitorStop(); return; }
+        if (b[0] === 0x4b) {              // 'K' - kanji glyph bitmaps
+          const dv = new DataView(e.data);
+          const seq = dv.getUint32(1, true);
+          const npages = dv.getUint32(5, true);
+          const box = $("paper");
+          box.replaceChildren();
+          let off = 9;
+          for (let i = 0; i < npages; i++) {
+            const w = dv.getUint32(off, true), h = dv.getUint32(off + 4, true);
+            off += 8;
+            const bits = b.subarray(off, off + w * h);
+            off += w * h;
+            if (npages > 1) {
+              const label = document.createElement("div");
+              label.className = "pageno";
+              label.textContent = `page ${i + 1} — ${w} x ${h}`;
+              box.append(label);
+            }
+            const cv = document.createElement("canvas");
+            cv.width = w; cv.height = h;
+            const g = cv.getContext("2d");
+            const img = g.createImageData(w, h);
+            for (let k = 0; k < bits.length; k++) {
+              const v = bits[k] ? 0 : 255;
+              img.data[k * 4] = img.data[k * 4 + 1] = img.data[k * 4 + 2] = v;
+              img.data[k * 4 + 3] = 255;
+            }
+            g.putImageData(img, 0, 0);
+            box.append(cv);
+          }
+          $("paperinfo").textContent =
+            `job ${seq} · ${npages} page${npages === 1 ? "" : "s"}`
+            + " · drawn with the kanji ROM";
+          applyZoom();
+          return;
+        }
+        if (b[0] === PRINT_DATA) {
+          const seq = new DataView(e.data).getUint32(1, true);
+          const body = b.subarray(5);
+          const info = jobs.find((x) => x.seq === seq);
+          const mode = info ? info.mode : "raster";
+          const job = (mode === "msx-kanji" || mode === "msx-hangul")
+            ? drawText(body, mode) : drawRaster(body);
+          job.then((n) => {
+            $("paperinfo").textContent =
+              `job ${seq} · ${body.length} bytes · ${mode}`
+              + ` · ${n} page${n === 1 ? "" : "s"}`
+              + (mode === "msx-kanji" || mode === "msx-hangul"
+                 ? " · drawn with your system font" : "");
+            applyZoom();
+          }).catch((err) => {
+            $("paper").innerHTML = "";
+            $("paperinfo").textContent = `could not draw job ${seq}: ${err.message}`;
+          });
+        }
+        return;
+      }
+      const m = JSON.parse(e.data);
+      if (m.type === "state") draw(m);
+      else if (m.type === "ev") {
+        put(m);
+        // A job just closed, so the list changed. Asking beats guessing what
+        // the new row looks like.
+        if (m.ch === "print" && (m.ev === "spool_job" || m.ev === "job_end")) askJobs();
+        if (m.ch === "link" && m.ev === "lost") {
+          // A dropped link means the frames stop. Clear what is queued so the
+          // last 60 ms does not replay as a stutter when it comes back.
+          if (psg) psg.port.postMessage({ cmd: "reset" });
+
+          // **그리고 신디사이저를 조용히 시킨다.** 같은 USB 장치가 사라지는
+          // 것이라 Web MIDI 의 onstatechange 도 곧 오지만, CoreMIDI 가 그걸
+          // 알아채는 데 2 초쯤 걸린다 - 그동안 음이 계속 울린다. 시리얼 쪽
+          // 읽기는 장치 노드가 사라지는 즉시 실패하므로 이쪽이 빠르다.
+          //
+          // 둘 다 두는 이유는 어느 쪽이 먼저일지 모르기 때문이다. 두 번
+          // 보내도 해가 없다 - 이미 조용한 음원에 "그만 울려라" 는 무동작이다.
+          hushAll("the link dropped");
+        }
+      }
+      else if (m.type === "reply") {
+        const keyFor = m.id == null ? null
+          : KEYED.map(([who]) => who).find((who) => keyWaiting[who] === m.id);
+        if (keyFor) {
+          keyWaiting[keyFor] = null;
+          keyNote[keyFor] = m.ok ? "" : (m.why || "the key was not taken");
+          if (state) draw(state);
+          return;
+        }
+        if (editWaiting.has(m.id)) {
+          const what = editWaiting.get(m.id);
+          editWaiting.delete(m.id);
+
+          if (what === "file_read") {
+            if (m.ok) { edReadRetry = 0; edLoaded(m); return; }
+            // 방금 저장한 직후라면 디스크가 아직 도구에게 대여된 상태일 수
+            // 있다 (실측 0.6초 안쪽). 그때의 "paused" 는 실패가 아니라
+            // 순서 문제라, 잠깐 뒤에 다시 묻는다 - 트리 쪽과 같은 규칙이다.
+            if (edReadRetry > 0 && /paused/.test(m.why || "") && edPath) {
+              edReadRetry--;
+              setTimeout(() => {
+                if (!edPath) return;
+                send2({ cmd: "file_read", path: onDisk(edPath),
+                        charset: $("ed-cs").value || undefined });
+              }, 300);
+              return;
+            }
+            $("ed-text").disabled = true;
+            $("ed-note").className = "ed-note";
+            $("ed-note").textContent = m.why || "could not read it";
+            return;
+          }
+          if (what === "doc_make") {
+            if (m.ok) { clearErr(); docShow(m); }
+            else { showErr(m.why || "could not build the document"); drawDocPicked(); }
+            return;
+          }
+          if (what === "doc_print") {
+            if (m.ok) $("doc-info").textContent = m.text || "opened in Preview";
+            else showErr(m.why || "could not open it in Preview");
+            return;
+          }
+          if (what === "doc_drop") return;
+          if (what === "file_mkdir") {
+            if (m.ok) {
+              pending(`Created the folder - run PDSYNC on the MSX.`);
+              lastTree = null; filesRetry = 8; askFiles();
+            } else {
+              showErr(m.why || "could not make the folder");
+              put({ ch: "disk", ev: "note", t: Date.now() / 1000, seq: 0,
+                    text: m.why || "could not make the folder" });
+            }
+            return;
+          }
+          if (what === "file_new") {
+            if (m.ok) {
+              pending(`Created ${m.path} - run PDSYNC on the MSX.`);
+              lastTree = null; filesRetry = 8; askFiles();
+              // 만들자마자 연다. 빈 파일을 만들어 놓고 다시 찾아 누르게
+              // 하는 것은 한 번 더 시키는 일이다.
+              edOpen("/" + m.path);
+            } else {
+              showErr(m.why || "could not create it");
+              put({ ch: "disk", ev: "note", t: Date.now() / 1000, seq: 0,
+                    text: m.why || "could not create it" });
+            }
+            return;
+          }
+          if (what === "file_write") {
+            if (m.ok) {
+              edWas = $("ed-text").value;     // 이제 이것이 디스크에 있는 것이다
+              if (edFacts) { edFacts.bytes = m.bytes; drawEdInfo(); }
+              edSetNote();
+              pending(`Saved ${m.name} (${m.bytes} B) - run PDSYNC on the MSX.`);
+              lastTree = null; filesRetry = 8; askFiles();
+            } else {
+              $("ed-save").disabled = false;
+              $("ed-note").className = "ed-note";
+              $("ed-note").textContent = m.why || "could not save";
+              put({ ch: "disk", ev: "note", t: Date.now() / 1000, seq: 0,
+                    text: m.why || "could not save" });
+            }
+            return;
+          }
+
+          if (m.ok) {
+            clearErr();
+            // 도구가 찍은 줄에 PDSYNC 안내가 이미 들어 있다. 그대로 로그에
+            // 남기고, 화면 위에도 한 줄 띄운다.
+            for (const line of String(m.text || "").split("\n"))
+              if (line.trim()) put({ ch: "disk", ev: "note", t: Date.now() / 1000,
+                                     seq: 0, text: line });
+            pending("Done - run PDSYNC on the MSX, or Nextor keeps showing the old list.");
+          } else {
+            for (const line of String(m.why || "").split("\n"))
+              if (line.trim()) put({ ch: "disk", ev: "note", t: Date.now() / 1000,
+                                     seq: 0, text: line });
+            // 도구가 찍은 것을 통째로 보여 준다. 첫 줄만 보여 주면 "왜" 가
+            // 둘째 줄에 있을 때 그것을 잃는다 - disk_rm 의 안내가 그렇다.
+            showErr(String(m.why || "").trim());
+          }
+          lastTree = null;            // 바뀌었으니 반드시 다시 그린다
+          // **바로 읽으면 거절당한다.** 도구가 빌려 간 디스크를 서버가 도로
+          // 받는 데 잠깐 걸린다 (실측 0.6초 안쪽). 그때 "the image is paused"
+          // 를 에러로 띄우면, 실제로는 성공한 일에 빨간 줄이 붙는다.
+          filesRetry = 8;
+          askFiles();
+          return;
+        }
+        if (filesWaiting.has(m.id)) {
+          filesWaiting.delete(m.id);
+          if (m.ok) { filesRetry = 0; drawTree(m); return; }
+          // 빌려 간 사이라면 기다렸다 다시 묻는다. 그 밖의 이유는 보여 준다.
+          if (filesRetry > 0 && /paused/.test(m.why || "")) {
+            filesRetry--;
+            setTimeout(askFiles, 300);
+            return;
+          }
+          pending(m.why || "Could not read the image.");
+          return;
+        }
+        if (m.jobs) { jobs = m.jobs; drawJobs(); }
+        else if (m.root) drawTree(m);
+        else if (m.job) showJob(m.job);
+        else if (!m.ok) put({ ch: "link", ev: "note",
+                              t: Date.now() / 1000, seq: 0, text: m.why });
+      }
+    };
+    ws.onclose = () => {
+      $("gone").classList.add("show");
+      // The server going away is normal: it is restarted whenever the firmware
+      // or the image changes. Back off so a server that stays down does not
+      // turn this tab into a load generator.
+      setTimeout(open, backoff);
+      backoff = Math.min(backoff * 2, 5000);
+    };
+    ws.onerror = () => { try { ws.close(); } catch {} };
+  }
+
+  // One switch, two things: tell the cartridge to send the registers, and
+  // start making sound from them. Separating them would let you turn on a
+  // stream nobody listens to, or a synthesiser with nothing to synthesise -
+  // two ways to end up with silence and no idea why.
+  $("sw-psg").onclick = async () => {
+    // 지금 들리고 있나? 그 반대로 간다. 서버의 기억이 아니라 귀에 닿는 것이
+    // 기준이라야, 새로고침 뒤 첫 클릭이 "켜기" 로 동작한다.
+    const audible = !!(state?.toggles.psg && playing);
+    const on = !audible;
+    try {
+      if (on) await audioOn(); else await audioOff();
+    } catch (err) {
+      $("st-note").textContent = `audio failed: ${err.message}`;
+      note(`audio failed: ${err.message}`);
+      return;                                  // do not claim it is on
+    }
+    send({ cmd: "set", what: "psg", on });
+  };
+  $("sw-midipac").onclick = () => send({ cmd: "set", what: "midipac", on: !state?.toggles.midipac });
+
+  $("sw-voice").onclick = () => send({ cmd: "voice", enabled: !state?.voice?.enabled });
+  $("v-engine").onchange = () => send({ cmd: "voice", engine: $("v-engine").value });
+  $("v-lang").onchange = () => send({ cmd: "voice", lang: $("v-lang").value });
+  $("v-deliver").onchange = () => send({ cmd: "voice", deliver: $("v-deliver").value });
+  // The voice name is free text, so it goes on blur and on Enter rather than
+  // on every keystroke - one request a letter would be a request a letter.
+  $("v-name").onchange = () => send({ cmd: "voice", voice: $("v-name").value });
+  $("v-stop").onclick = () => send({ cmd: "voice_stop" });
+  $("sw-monitor").onclick = async () => {
+    monitorOn = !monitorOn;
+    try { localStorage.setItem("pd.monitor", monitorOn ? "1" : "0"); } catch { /* 막혀 있다 */ }
+    // **소리를 낼 수 있는 것은 사람이 누른 그 순간뿐이다.** 여기서 컨텍스트를
+    // 깨워 두지 않으면, 첫 말이 도착했을 때 브라우저가 재생을 거절한다.
+    if (monitorOn && !mac) {
+      mac = new AudioContext();
+      mgain = mac.createGain();
+      mgain.gain.value = Number($("vol").value) / 100;
+      mgain.connect(mac.destination);
+    }
+    if (mac) { if (monitorOn) await mac.resume(); else monitorStop(); }
+    drawMonitor();
+    note(`monitor ${monitorOn ? "on" : "off"}`);
+  };
+  $("sw-pause").onclick = () => send({ cmd: "set", what: "pause", on: !state?.toggles.pause });
+
+  // 무엇으로 답하나. 셋 중 하나가 눌려 있다.
+  for (const [id, reply] of [["ask-rtext", "text"], ["ask-rvoice", "voice"], ["ask-rboth", "both"]])
+    $(id).addEventListener("click", () => {
+      send({ cmd: "ask_reply", reply });
+      note(`reply with: ${reply}`);
+    });
+
+  // 누가 답하나. 두 칸 중 하나가 눌려 있고, 누르면 그쪽으로 바뀐다.
+  for (const [id, mode] of [["ask-google", "google"], ["ask-manual", "manual"],
+                            ["ask-echo", "echo"], ["ask-claude", "claude"],
+                            ["ask-gemini", "gemini"]])
+    $(id).addEventListener("click", () => {
+      send({ cmd: "ask_mode", mode });
+      note(`answered by: ${mode}`);
+    });
+
+  // Claude·Gemini 의 키. **보내자마자 칸을 비운다** - 화면에 남겨 둘 이유가
+  // 없다. 어디에도 적지 않는다: localStorage 에도, 서버 로그(note)에도.
+  function useKey(who) {
+    const key = $(`${who}-key`).value.trim();
+    $(`${who}-key`).value = "";
+    if (!key) return;
+    keyNote[who] = "";
+    keyWaiting[who] = ++editId;
+    if (!send({ cmd: "ask_key", who, key, id: keyWaiting[who] })) keyWaiting[who] = null;
+    if (state) draw(state);
+  }
+  for (const [who] of KEYED) {
+    $(`${who}-use`).onclick = () => useKey(who);
+    $(`${who}-key`).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); useKey(who); }
+    });
+    $(`${who}-forget`).onclick = () => {
+      keyNote[who] = "";
+      send({ cmd: "ask_key_forget", who });
+    };
+  }
+
+  $("askform").onsubmit = (e) => {
+    e.preventDefault();
+    const text = $("askinput").value.trim();
+    if (!text) return;
+    send({ cmd: "answer", text });
+    $("askinput").value = "";
+  };
+  $("askno").onclick = () => send({ cmd: "refuse" });
+
+  show(current);
+  open();
+  } catch (err) { fatal(err); }
+})();
+</script>
+</body>
+</html>

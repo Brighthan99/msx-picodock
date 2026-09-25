@@ -10,85 +10,92 @@ cd "$(dirname "$0")/.."
 
 IMG="${TMPDIR:-/tmp}/pdtest-disk-image.img"
 rm -f "$IMG"
-# 8m, not 128m: nothing here cares about free space, and the small one is built
-# and thrown away in a fraction of the time.
-python3 dist/disk/tools/build_disk.py bare dist/disk 8m "$IMG" PICODOCK >/dev/null || {
+# 9m, not 128m: nothing here cares about free space, and the small one is built
+# and thrown away in a fraction of the time. 9m is the floor, not a round number
+# - below it a 2KB-cluster volume has fewer than 4085 clusters and is FAT12,
+# which these tools refuse.
+node dist/node/bin/build_disk.js bare dist/disk 9m "$IMG" PICODOCK >/dev/null || {
   echo "  FAIL could not build a disk image from dist/disk/system/"
   exit 1; }
 export IMG
 trap 'rm -f "$IMG"' EXIT
 
-exec python3 - <<'PY'
-import os, struct, sys
+exec node --input-type=module - <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
 
-# The one just built, not picodock.img: that is whatever the person running this
-# has put on it, and holding that to system/ would fail for them.
-IMG, SRC = os.environ["IMG"], "dist/disk/system"
+// The one just built, not picodock.img: that is whatever the person running this
+// has put on it, and holding that to system/ would fail for them.
+const IMG = process.env.IMG, SRC = 'dist/disk/system';
 
-def root_entries(path):
-    """Name -> size, from the FAT16 root directory.
+// Name -> size, from the FAT16 root directory.
+//
+// Located through the MBR and the BPB rather than by scanning for something
+// that looks like a directory. The scan version of this worked until the disk
+// had enough files to be interesting, then reported one of them missing when
+// it was not - a test that cries wolf is worse than no test.
+function rootEntries(file) {
+  const fd = fs.openSync(file, 'r');
+  const head = Buffer.alloc(0x100000);
+  fs.readSync(fd, head, 0, head.length, 0);
+  fs.closeSync(fd);
 
-    Located through the MBR and the BPB rather than by scanning for something
-    that looks like a directory. The scan version of this worked until the disk
-    had enough files to be interesting, then reported one of them missing when
-    it was not - a test that cries wolf is worse than no test.
-    """
-    with open(path, "rb") as f:
-        head = f.read(0x100000)
+  const start = head.readUInt32LE(446 + 8);                 // first partition LBA
+  const bpb = head.subarray(start * 512, start * 512 + 512);
+  const bytesPerSec = bpb.readUInt16LE(11);
+  const reserved = bpb.readUInt16LE(14);
+  const nFats = bpb[16];
+  const rootMax = bpb.readUInt16LE(17);
+  const fatSecs = bpb.readUInt16LE(22);
+  if (bytesPerSec !== 512 || !rootMax) {
+    console.log(`  FAIL ${file} does not look like the FAT16 we write`);
+    process.exit(1);
+  }
 
-    start = struct.unpack("<I", head[446 + 8:446 + 12])[0]   # first partition LBA
-    bpb = head[start * 512:start * 512 + 512]
-    bytes_per_sec = struct.unpack("<H", bpb[11:13])[0]
-    reserved = struct.unpack("<H", bpb[14:16])[0]
-    n_fats = bpb[16]
-    root_entries_max = struct.unpack("<H", bpb[17:19])[0]
-    fat_secs = struct.unpack("<H", bpb[22:24])[0]
-    if bytes_per_sec != 512 or not root_entries_max:
-        raise SystemExit("  FAIL %s does not look like the FAT16 we write" % path)
+  const root = (start + reserved + nFats * fatSecs) * 512;
+  const out = new Map();
+  for (let i = 0; i < rootMax; i++) {
+    const e = head.subarray(root + i * 32, root + i * 32 + 32);
+    if (e[0] === 0x00) break;                                // end of directory
+    if (e[0] === 0xE5 || (e[11] & 0x0F) === 0x0F) continue;  // deleted, or a VFAT part
+    const name = e.subarray(0, 8).toString('latin1').trim();
+    const ext = e.subarray(8, 11).toString('latin1').trim();
+    out.set(ext ? `${name}.${ext}` : name, e.readUInt32LE(28));
+  }
+  return out;
+}
 
-    root = (start + reserved + n_fats * fat_secs) * 512
-    out = {}
-    for i in range(root_entries_max):
-        e = head[root + i * 32:root + i * 32 + 32]
-        if e[:1] == b"\x00":                 # end of directory
-            break
-        if e[:1] == b"\xe5" or e[11] & 0x0F == 0x0F:   # deleted, or a VFAT part
-            continue
-        name = e[0:8].decode("ascii", "replace").strip()
-        ext = e[8:11].decode("ascii", "replace").strip()
-        out[f"{name}.{ext}" if ext else name] = struct.unpack("<I", e[28:32])[0]
-    return out
+const onDisk = rootEntries(IMG);
+const wanted = new Map(fs.readdirSync(SRC).filter((f) => !f.startsWith('.')).sort()
+  .map((f) => [f, fs.statSync(path.join(SRC, f)).size]));
 
+// Everything else on the image is somebody else's business: what the user put in
+// user-files/, and what the MSX itself wrote there - SofaRun makes a SAVES
+// directory the first time it runs. This check exists to catch a system file
+// that went stale, not to police a disk that is in use.
 
-on_disk = root_entries(IMG)
-wanted = {f: os.path.getsize(os.path.join(SRC, f))
-          for f in sorted(os.listdir(SRC)) if not f.startswith(".")}
+let fail = 0;
+for (const [name, size] of wanted) {
+  const got = onDisk.get(name.toUpperCase());
+  if (got === undefined) {
+    console.log(`  FAIL ${name} is in ${SRC}/ but not on the image`);
+    fail = 1;
+  } else if (got !== size) {
+    console.log(`  FAIL ${name}: image has ${got} bytes, ${SRC}/ has ${size}`);
+    console.log('       the disk builder is not picking that file up -');
+    console.log('       check node/src/diskmake.js (build_disk.js) and stage_dist.sh');
+    fail = 1;
+  } else {
+    console.log(`  OK   ${name}  ${size}`);
+  }
+}
 
-# Everything else on the image is somebody else's business: what the user put in
-# user-files/, and what the MSX itself wrote there - SofaRun makes a SAVES
-# directory the first time it runs. This check exists to catch a system file
-# that went stale, not to police a disk that is in use.
+const upper = new Set([...wanted.keys()].map((n) => n.toUpperCase()));
+const extra = [...onDisk.keys()].filter((n) => !upper.has(n)).sort();
+if (extra.length)
+  console.log('  --   also on the image (yours, or the MSX\'s): '
+    + extra.slice(0, 8).join(', ') + (extra.length > 8 ? ' ...' : ''));
 
-fail = 0
-for name, size in wanted.items():
-    got = on_disk.get(name.upper())
-    if got is None:
-        print(f"  FAIL {name} is in {SRC}/ but not on the image")
-        fail = 1
-    elif got != size:
-        print(f"  FAIL {name}: image has {got} bytes, {SRC}/ has {size}")
-        print("       the disk builder is not picking that file up -")
-        print("       check dist/disk/tools/build_disk.py and stage_user_files.py")
-        fail = 1
-    else:
-        print(f"  OK   {name}  {size}")
-
-extra = sorted(set(on_disk) - {n.upper() for n in wanted})
-if extra:
-    print("  --   also on the image (yours, or the MSX's): "
-          + ", ".join(extra[:8]) + (" ..." if len(extra) > 8 else ""))
-
-if not fail:
-    print("  all passed")
-sys.exit(fail)
-PY
+if (!fail) console.log('  all passed');
+process.exit(fail);
+JS

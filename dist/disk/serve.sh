@@ -20,10 +20,16 @@
 # that ever unpacks this. Pass --output somewhere/else to change it.
 #
 # The third of the three. ../cartridge/make-uf2.sh makes what you flash,
-# make-disk.sh makes what you serve, this serves it. Each wraps something in
-# tools/ with the answers most people want, so the common case takes no
-# arguments. tools/pd_diskserver.py is the same program without the opinions -
-# it takes an image, and --tui only if you ask.
+# make-disk.sh makes what you serve, this serves it. Each wraps a program in
+# ../node/ with the answers most people want, so the common case takes no
+# arguments. ../node/bin/pdserve.js is the same program without the opinions -
+# it takes an image.
+#
+# The opinions, since 2026-09-25 when this moved from Python to Node.js: print
+# jobs are rendered as they finish (--print auto) and every printed byte is kept
+# (--spool), and the screen at http://127.0.0.1:8080/ is on (--web) - that is
+# where the disk, the printer, PDASK and the PSG sound are. Pass any of them
+# yourself to change it (--print off, --web 9000, --no-web); what you pass wins.
 # ---------------------------------------------------------------------------
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -47,14 +53,14 @@ esac
 # makes "../output" mean the same thing wherever this tree has been unpacked.
 cd "$HERE"
 
-[ -e tools/pd_diskserver.py ] || {
-  echo "[-] tools/pd_diskserver.py is missing."
-  echo "    tools/ is staged from src/host/ by ./src/stage_dist.sh - run that."
-  exit 1; }
+# Node.js, and the first time, the serial-port package. need-node.sh says what
+# to install when something is missing.
+DIST="$HERE/.."
+NEED_PACKAGES=1 . "$DIST/need-node.sh"
 
 # A fresh clone has no picodock.img, so build one rather than stopping. No image
 # is shipped: it would be a hundred-odd megabytes of mostly nothing in the
-# repository, and making one needs only Python, which you already have to have
+# repository, and making one needs only Node.js, which you already have to have
 # to be here. Building also picks up whatever is in user-files/ already, which
 # copying a shipped image could never do.
 if [ ! -f "$IMAGE" ] && [ "$IMAGE" = picodock.img ] && [ -f make-disk.sh ]; then
@@ -67,4 +73,6 @@ fi
   echo "    make one:  ./dist/disk/make-disk.sh"
   exit 1; }
 
-exec ./tools/pd_diskserver.py "$IMAGE" --tui --output ../output "$@"
+# Yours first: the server takes the first value it is given, so these are only
+# the defaults.
+exec node "$NODEDIR/bin/pdserve.js" "$IMAGE" "$@" --out ../output --print auto --spool --web
